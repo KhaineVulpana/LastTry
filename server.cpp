@@ -691,6 +691,11 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, i
         int stride = ((width * 3 + 3) & ~3);
         uint8_t* dst = static_cast<uint8_t*>(pBits);
         const uint8_t* src = screen_data.data();
+
+        // Clear the entire buffer to avoid artifacts in the padding bytes
+        memset(dst, 0, static_cast<size_t>(stride) * static_cast<size_t>(height));
+
+        // Copy each row's pixel data, leaving zeroed padding at the end of each row
         for (int y = 0; y < height; ++y) {
             memcpy(dst + static_cast<size_t>(y) * stride,
                    src + static_cast<size_t>(y) * width * 3,
