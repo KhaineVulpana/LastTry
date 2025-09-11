@@ -236,7 +236,14 @@ public:
         int imageSize = stride * screen_height;
         std::vector<BYTE> rawData(imageSize);
 
-        GetDIBits(hdcMem, hBitmap, 0, screen_height, rawData.data(), &bmi, DIB_RGB_COLORS);
+        if (GetDIBits(hdcMem, hBitmap, 0, screen_height, rawData.data(), &bmi, DIB_RGB_COLORS) == 0) {
+            std::cerr << "GetDIBits failed: " << GetLastError() << std::endl;
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
+            ReleaseDC(nullptr, hdcScreen);
+            return {};
+        }
 
         std::vector<BYTE> frameData(static_cast<size_t>(screen_width) * screen_height * 3);
         for (int y = 0; y < screen_height; ++y) {
@@ -509,8 +516,11 @@ public:
     
     void sendDesktopFrame() {
         std::vector<BYTE> frameData = screen_capture.captureFrame();
-        
-        if (frameData.empty()) return;
+
+        if (frameData.empty()) {
+            std::cerr << "captureFrame returned empty; skipping send" << std::endl;
+            return;
+        }
         
         bool frameChanged = true;
         if (!last_frame_data.empty() && last_frame_data.size() == frameData.size()) {
