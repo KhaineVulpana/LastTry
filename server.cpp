@@ -598,6 +598,22 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
 
             auto decoded = ClientProtocolHandler::decodeFromClient(encoded);
             auto screen_data = ClientProtocolHandler::decompressRLE(decoded);
+            // Validate frame length before updating the screen buffer
+            size_t expected_size = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
+            if (screen_data.size() != expected_size) {
+                Logger::error("Invalid frame size for session " + session_id +
+                              ": expected " + std::to_string(expected_size) +
+                              " bytes, got " + std::to_string(screen_data.size()));
+                // Optionally notify the client to resend the frame
+                auto diag_payload = TunnelProtocol::createTunnelPayload("error", "invalid_frame");
+                WireGuardPacket diag_pkt(diag_payload);
+                auto diag_out = diag_pkt.serialize();
+                uint32_t diag_len = htonl(static_cast<uint32_t>(diag_out.size()));
+                sendAll(client_socket, reinterpret_cast<const char*>(&diag_len), sizeof(diag_len));
+                sendAll(client_socket, reinterpret_cast<const char*>(diag_out.data()), diag_out.size());
+                continue; // Discard corrupted frame
+            }
+
             bool changed = c->updateScreen(screen_data, width, height);
             if (changed && c->viewer_window && IsWindow(c->viewer_window)) {
                 PostMessage(c->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
