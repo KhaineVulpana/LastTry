@@ -1,4 +1,4 @@
-# VPN Tunnel Remote Desktop - Windows Build
+	# VPN Tunnel Remote Desktop - Windows Build
 # Optimized for Windows-only deployment
 
 # Compiler settings
@@ -69,7 +69,6 @@ test-build: all
 	@echo "🔧 Advanced Usage:"
 	@echo "  Server: $(SERVER_EXE) [custom_port]"
 	@echo "  Client: $(CLIENT_EXE) console 192.168.88.3 443"
-	@echo "  Service: $(CLIENT_EXE) install 192.168.88.3 443"
 	@echo ""
 	@echo "🛡️ Stealth Features:"
 	@echo "  • VPN-disguised traffic (port 443)"
