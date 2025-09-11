@@ -1,0 +1,111 @@
+name: Build VPN Tunnel Remote Desktop (Windows)
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    name: Build for Windows
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup MinGW
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        install: mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+        
+    - name: Build VPN Tunnel Apps
+      shell: msys2 {0}
+      run: |
+        echo "Building VPN Tunnel Remote Desktop for Windows..."
+        echo "Client (nordvpn.exe):"
+        g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN client.cpp -o nordvpn.exe -lws2_32 -ld3d11 -ldxgi -lntdll -lgdi32 -luser32 -static
+        echo "Server (server.exe):"
+        g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN server.cpp -o server.exe -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
+        
+    - name: Verify builds
+      shell: msys2 {0}
+      run: |
+        echo "Checking build artifacts..."
+        ls -la *.exe
+        echo "✅ nordvpn.exe built successfully"
+        echo "✅ server.exe built successfully"
+        
+    - name: Upload Windows executables
+      uses: actions/upload-artifact@v4
+      with:
+        name: vpn-tunnel-windows
+        path: |
+          nordvpn.exe
+          server.exe
+        retention-days: 30
+
+  create-release:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: build-windows
+    runs-on: windows-latest
+    name: Create Release Package
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: vpn-tunnel-windows
+        path: ./build/
+        
+    - name: Create release package
+      run: |
+        # Create release directory
+        mkdir release
+        
+        # Copy executables
+        copy build\nordvpn.exe release\
+        copy build\server.exe release\
+        
+        # Copy source files
+        copy client.cpp release\
+        copy server.cpp release\
+        
+        # Create README
+        echo "# VPN Tunnel Remote Desktop" > release\README.md
+        echo "" >> release\README.md
+        echo "## 🎯 Easy Usage (Double-click)" >> release\README.md
+        echo "1. Double-click **server.exe** to start server on port 443" >> release\README.md
+        echo "2. Double-click **nordvpn.exe** to connect with GUI prompt" >> release\README.md
+        echo "" >> release\README.md
+        echo "## 🔧 Advanced Usage" >> release\README.md
+        echo "- Custom server port: server.exe 9000" >> release\README.md
+        echo "- Console client: nordvpn.exe console 192.168.88.3 443" >> release\README.md
+        echo "- Service install: nordvpn.exe install 192.168.88.3 443" >> release\README.md
+        echo "" >> release\README.md
+        echo "## 📋 Features" >> release\README.md
+        echo "- VPN-disguised traffic on port 443 (HTTPS)" >> release\README.md
+        echo "- Low-level D3D11 screen capture" >> release\README.md
+        echo "- NT API input injection" >> release\README.md
+        echo "- Split-screen viewer mode" >> release\README.md
+        echo "- Background service operation" >> release\README.md
+        echo "" >> release\README.md
+        echo "## 🏗️ Build Info" >> release\README.md
+        echo "Built on: %date% %time%" >> release\README.md
+        echo "Commit: ${{ github.sha }}" >> release\README.md
+        
+        # Create ZIP package
+        powershell Compress-Archive -Path release\* -DestinationPath vpn-tunnel-desktop-windows.zip
+        
+    - name: Upload release package
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-package
+        path: vpn-tunnel-desktop-windows.zip
+        retention-days: 90
