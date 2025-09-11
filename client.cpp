@@ -127,7 +127,7 @@ struct WireGuardPacket {
         }
     }
     
-    std::vector<BYTE> serialize() {
+    std::vector<BYTE> serialize() const {
         std::vector<BYTE> packet;
         packet.resize(sizeof(WireGuardHeader));
         memcpy(packet.data(), &header, sizeof(WireGuardHeader));

