@@ -27,7 +27,7 @@ jobs:
       run: |
         echo "Building VPN Tunnel Remote Desktop for Windows..."
         echo "Client (nordvpn.exe):"
-        g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN client.cpp -o nordvpn.exe -lws2_32 -ld3d11 -ldxgi -lntdll -lgdi32 -luser32 -static
+        g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN client.cpp -o nordvpn.exe -lws2_32 -lntdll -lgdi32 -luser32 -static
         echo "Server (server.exe):"
         g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN server.cpp -o server.exe -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
         
