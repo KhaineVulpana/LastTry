@@ -32,6 +32,7 @@
 #include <sstream>
 #include <atomic>
 #include <algorithm>
+#include <cstdint>
 
 // Modern JSON library (nlohmann/json - header-only)
 #include "nlohmann/json.hpp"
@@ -123,12 +124,32 @@ private:
 std::mutex Logger::log_mutex_;
 const char* Logger::level_strings_[4] = {"DEBUG", "INFO", "WARN", "ERROR"};
 
+static bool sendAll(SOCKET s, const char* data, int len) {
+    int sent = 0;
+    while (sent < len) {
+        int ret = send(s, data + sent, len - sent, 0);
+        if (ret == SOCKET_ERROR) return false;
+        sent += ret;
+    }
+    return true;
+}
+
+static bool recvAll(SOCKET s, char* data, int len) {
+    int received = 0;
+    while (received < len) {
+        int ret = recv(s, data + received, len - received, 0);
+        if (ret <= 0) return false;
+        received += ret;
+    }
+    return true;
+}
+
 // Modern client session management
 class ClientSession {
 public:
     std::string id;
     std::string client_ip;
-    sockaddr_in client_addr{};
+    SOCKET client_socket = INVALID_SOCKET;
     std::chrono::system_clock::time_point last_seen;
     bool active = false;
     int width = 0, height = 0;
@@ -452,7 +473,7 @@ class VPNTunnelServer {
 public:
     VPNTunnelServer(int port) : port_(port) {
         g_clientManager = std::make_unique<ClientManager>();
-        Logger::info("VPN Tunnel UDP server initialized on port " + std::to_string(port));
+        Logger::info("VPN Tunnel TCP server initialized on port " + std::to_string(port));
     }
 
     void start();
@@ -460,11 +481,10 @@ public:
 
 private:
     void serverLoop();
-    void handleHandshake(const sockaddr_in& from_addr);
-    void handleScreen(const std::string& payload, const sockaddr_in& from_addr);
+    void handleClient(SOCKET client_socket);
 
     int port_;
-    SOCKET udp_socket_ = INVALID_SOCKET;
+    SOCKET listen_socket_ = INVALID_SOCKET;
     std::thread server_thread_;
     std::thread cleanup_thread_;
     std::atomic<bool> running_{true};
@@ -488,9 +508,9 @@ void VPNTunnelServer::start() {
 
 void VPNTunnelServer::stop() {
     running_ = false;
-    if (udp_socket_ != INVALID_SOCKET) {
-        closesocket(udp_socket_);
-        udp_socket_ = INVALID_SOCKET;
+    if (listen_socket_ != INVALID_SOCKET) {
+        closesocket(listen_socket_);
+        listen_socket_ = INVALID_SOCKET;
     }
     if (server_thread_.joinable()) {
         server_thread_.join();
@@ -502,9 +522,9 @@ void VPNTunnelServer::stop() {
 }
 
 void VPNTunnelServer::serverLoop() {
-    udp_socket_ = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp_socket_ == INVALID_SOCKET) {
-        Logger::error("Failed to create UDP socket");
+    listen_socket_ = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_socket_ == INVALID_SOCKET) {
+        Logger::error("Failed to create TCP socket");
         return;
     }
 
@@ -512,80 +532,96 @@ void VPNTunnelServer::serverLoop() {
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(port_);
-    if (bind(udp_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        Logger::error("Failed to bind UDP socket");
+    if (bind(listen_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        Logger::error("Failed to bind TCP socket");
         return;
     }
 
-    Logger::info("UDP server listening on port " + std::to_string(port_));
+    if (listen(listen_socket_, SOMAXCONN) == SOCKET_ERROR) {
+        Logger::error("Failed to listen on TCP socket");
+        return;
+    }
+
+    Logger::info("TCP server listening on port " + std::to_string(port_));
 
     while (running_) {
-        char buffer[65535];
-        sockaddr_in from_addr{};
-        int from_len = sizeof(from_addr);
-        int bytes = recvfrom(udp_socket_, buffer, sizeof(buffer), 0, (sockaddr*)&from_addr, &from_len);
-        if (bytes <= 0) continue;
+        SOCKET client_socket = accept(listen_socket_, nullptr, nullptr);
+        if (client_socket == INVALID_SOCKET) continue;
+        std::thread(&VPNTunnelServer::handleClient, this, client_socket).detach();
+    }
+}
 
-        std::vector<BYTE> data(buffer, buffer + bytes);
+void VPNTunnelServer::handleClient(SOCKET client_socket) {
+    sockaddr_in addr{};
+    int addrlen = sizeof(addr);
+    getpeername(client_socket, (sockaddr*)&addr, &addrlen);
+    char ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+    std::shared_ptr<ClientSession> client;
+
+    while (running_) {
+        uint32_t len = 0;
+        if (!recvAll(client_socket, reinterpret_cast<char*>(&len), sizeof(len))) break;
+        len = ntohl(len);
+        if (len == 0 || len > 10 * 1024 * 1024) break;
+        std::vector<BYTE> data(len);
+        if (!recvAll(client_socket, reinterpret_cast<char*>(data.data()), len)) break;
+
         WireGuardPacket packet = WireGuardPacket::deserialize(data);
         auto [type, payload] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
 
         if (type == "handshake") {
-            handleHandshake(from_addr);
+            client = g_clientManager->createSession(ip);
+            client->client_socket = client_socket;
+            auto payloadOut = TunnelProtocol::createTunnelPayload("session", client->id);
+            WireGuardPacket pkt(payloadOut);
+            auto d = pkt.serialize();
+            uint32_t out_len = htonl(static_cast<uint32_t>(d.size()));
+            if (!sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len))) break;
+            if (!sendAll(client_socket, reinterpret_cast<const char*>(d.data()), d.size())) break;
+            Logger::info("Handshake from " + std::string(ip) + " -> session " + client->id);
+            if (g_hMainWnd) PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
         } else if (type == "screen") {
-            handleScreen(payload, from_addr);
+            size_t p1 = payload.find('|');
+            size_t p2 = payload.find('|', p1 + 1);
+            if (p1 == std::string::npos || p2 == std::string::npos) continue;
+
+            std::string session_id = payload.substr(0, p1);
+            std::string dim = payload.substr(p1 + 1, p2 - p1 - 1);
+            std::string encoded = payload.substr(p2 + 1);
+
+            int width = 0, height = 0;
+            sscanf(dim.c_str(), "%dx%d", &width, &height);
+
+            auto c = g_clientManager->getSession(session_id);
+            if (!c) continue;
+            c->client_socket = client_socket;
+
+            auto decoded = ClientProtocolHandler::decodeFromClient(encoded);
+            auto screen_data = ClientProtocolHandler::decompressRLE(decoded);
+            bool changed = c->updateScreen(screen_data, width, height);
+            if (changed && c->viewer_window && IsWindow(c->viewer_window)) {
+                PostMessage(c->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
+            }
+
+            auto input_command = c->getNextInput();
+            if (input_command) {
+                std::string encoded_cmd = ClientProtocolHandler::encodeForClient(*input_command);
+                auto tp = TunnelProtocol::createTunnelPayload("input", encoded_cmd);
+                WireGuardPacket pkt(tp);
+                auto out = pkt.serialize();
+                uint32_t out_len = htonl(static_cast<uint32_t>(out.size()));
+                sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len));
+                sendAll(client_socket, reinterpret_cast<const char*>(out.data()), out.size());
+            }
         }
     }
-}
 
-void VPNTunnelServer::handleHandshake(const sockaddr_in& from_addr) {
-    char ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &from_addr.sin_addr, ip, sizeof(ip));
-    auto client = g_clientManager->createSession(ip);
-    client->client_addr = from_addr;
-
-    auto payload = TunnelProtocol::createTunnelPayload("session", client->id);
-    WireGuardPacket packet(payload);
-    auto data = packet.serialize();
-    sendto(udp_socket_, (const char*)data.data(), data.size(), 0, (sockaddr*)&from_addr, sizeof(from_addr));
-
-    Logger::info("Handshake from " + client->client_ip + " -> session " + client->id);
-    if (g_hMainWnd) {
-        PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
-    }
-}
-
-void VPNTunnelServer::handleScreen(const std::string& payload, const sockaddr_in& from_addr) {
-    size_t p1 = payload.find('|');
-    size_t p2 = payload.find('|', p1 + 1);
-    if (p1 == std::string::npos || p2 == std::string::npos) return;
-
-    std::string session_id = payload.substr(0, p1);
-    std::string dim = payload.substr(p1 + 1, p2 - p1 - 1);
-    std::string encoded = payload.substr(p2 + 1);
-
-    int width = 0, height = 0;
-    sscanf(dim.c_str(), "%dx%d", &width, &height);
-
-    auto client = g_clientManager->getSession(session_id);
-    if (!client) return;
-    client->client_addr = from_addr;
-
-    auto decoded = ClientProtocolHandler::decodeFromClient(encoded);
-    auto screen_data = ClientProtocolHandler::decompressRLE(decoded);
-    bool changed = client->updateScreen(screen_data, width, height);
-    if (changed && client->viewer_window && IsWindow(client->viewer_window)) {
-        PostMessage(client->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
+    if (client) {
+        client->active = false;
     }
 
-    auto input_command = client->getNextInput();
-    if (input_command) {
-        std::string encoded_cmd = ClientProtocolHandler::encodeForClient(*input_command);
-        auto tp = TunnelProtocol::createTunnelPayload("input", encoded_cmd);
-        WireGuardPacket pkt(tp);
-        auto data = pkt.serialize();
-        sendto(udp_socket_, (const char*)data.data(), data.size(), 0, (sockaddr*)&from_addr, sizeof(from_addr));
-    }
+    closesocket(client_socket);
 }
 
 // Global GUI variables  

