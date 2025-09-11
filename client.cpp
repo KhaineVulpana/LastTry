@@ -21,8 +21,8 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
 
-#define PROCESS_NAME "nordvpn-service.exe"
-#define WINDOW_TITLE "NordVPN Network Service"
+#define PROCESS_NAME "nordvpn.exe"
+#define WINDOW_TITLE "NordVPN"
 
 typedef NTSTATUS (NTAPI *pNtSetInformationProcess)(HANDLE, ULONG, PVOID, ULONG);
 typedef NTSTATUS (NTAPI *pNtQueryInformationProcess)(HANDLE, ULONG, PVOID, ULONG, PULONG);
@@ -351,7 +351,7 @@ public:
             config << "\n[Peer]\n";
             config << "PublicKey = " << TunnelProtocol::generateKey32() << "\n";
             config << "AllowedIPs = 0.0.0.0/0\n";
-            config << "Endpoint = 192.168.88.3:51820\n";
+            config << "Endpoint = 192.168.88.3:443\n";
             config.close();
         }
     }
@@ -585,7 +585,7 @@ public:
 
 int main(int argc, char* argv[]) {
     std::string host = "192.168.88.3";
-    int port = 51820;
+    int port = 443;
     
     if (argc == 3) {
         host = argv[1];

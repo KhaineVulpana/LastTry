@@ -11,8 +11,7 @@
  * g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN server.cpp -o server.exe -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
  * 
  * VPN Port Strategy:
- * - Port 51820: WireGuard-style UDP transport for screen data
- * - Port 443 (HTTPS): Alternate disguise for UDP traffic
+ * - Port 443 (HTTPS): Default port to disguise tunnel traffic
  * - Avoid 8080: Too obvious as alt-HTTP, not VPN-related
  */
 
@@ -67,7 +66,7 @@ using namespace std::chrono_literals;
 
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
-    int port = 51820;  // UDP port used by client
+    int port = 443;  // Default port to mimic HTTPS traffic
     std::string log_level = "INFO";
     bool auto_refresh = true;
     int refresh_interval_ms = 5000;
