@@ -15,15 +15,12 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <d3d11.h>
-#include <dxgi1_2.h>
+#include <wingdi.h>
 #include <winternl.h>
 #include <winsvc.h>
 #include <io.h>
 #include <fcntl.h>
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "ntdll.lib")
 #pragma comment(lib, "advapi32.lib")
 
@@ -167,147 +164,87 @@ public:
 
 class ScreenCapture {
 private:
-    ID3D11Device* d3d_device;
-    ID3D11DeviceContext* d3d_context;
-    IDXGIOutputDuplication* desktop_duplication;
+    HDC memory_dc;
+    HBITMAP h_bitmap;
     int screen_width;
     int screen_height;
-    
+
 public:
-    ScreenCapture() : d3d_device(nullptr), d3d_context(nullptr), 
-                     desktop_duplication(nullptr), screen_width(0), screen_height(0) {}
-    
+    ScreenCapture() : memory_dc(nullptr), h_bitmap(nullptr),
+                      screen_width(0), screen_height(0) {}
+
     bool initialize() {
-        // Create D3D11 device for direct screen access
-        D3D_FEATURE_LEVEL feature_level;
-        HRESULT hr = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
-            nullptr, 0, D3D11_SDK_VERSION,
-            &d3d_device, &feature_level, &d3d_context
-        );
-        
-        if (FAILED(hr)) {
+        // Use GDI to query screen size and prepare capture surface
+        screen_width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        screen_height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        HDC screen_dc = GetDC(nullptr);
+        if (!screen_dc) {
             return false;
         }
-        
-        // Get DXGI device
-        IDXGIDevice* dxgi_device = nullptr;
-        hr = d3d_device->QueryInterface(__uuidof(IDXGIDevice), (void**)&dxgi_device);
-        if (FAILED(hr)) return false;
-        
-        // Get adapter
-        IDXGIAdapter* dxgi_adapter = nullptr;
-        hr = dxgi_device->GetParent(__uuidof(IDXGIAdapter), (void**)&dxgi_adapter);
-        if (FAILED(hr)) return false;
-        
-        // Get output
-        IDXGIOutput* dxgi_output = nullptr;
-        hr = dxgi_adapter->EnumOutputs(0, &dxgi_output);
-        if (FAILED(hr)) return false;
-        
-        // Get output1 for duplication
-        IDXGIOutput1* dxgi_output1 = nullptr;
-        hr = dxgi_output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&dxgi_output1);
-        if (FAILED(hr)) return false;
-        
-        // Create desktop duplication
-        hr = dxgi_output1->DuplicateOutput(d3d_device, &desktop_duplication);
-        if (FAILED(hr)) return false;
-        
-        // Get screen dimensions
-        DXGI_OUTDUPL_DESC dupl_desc;
-        desktop_duplication->GetDesc(&dupl_desc);
-        screen_width = dupl_desc.ModeDesc.Width;
-        screen_height = dupl_desc.ModeDesc.Height;
-        
-        // Cleanup interfaces
-        dxgi_output1->Release();
-        dxgi_output->Release();
-        dxgi_adapter->Release();
-        dxgi_device->Release();
-        
+
+        memory_dc = CreateCompatibleDC(screen_dc);
+        if (!memory_dc) {
+            ReleaseDC(nullptr, screen_dc);
+            return false;
+        }
+
+        h_bitmap = CreateCompatibleBitmap(screen_dc, screen_width, screen_height);
+        if (!h_bitmap) {
+            DeleteDC(memory_dc);
+            memory_dc = nullptr;
+            ReleaseDC(nullptr, screen_dc);
+            return false;
+        }
+
+        SelectObject(memory_dc, h_bitmap);
+        ReleaseDC(nullptr, screen_dc);
         return true;
     }
-    
+
     std::vector<BYTE> captureFrame() {
-        if (!desktop_duplication) return {};
-        
-        IDXGIResource* desktop_resource = nullptr;
-        DXGI_OUTDUPL_FRAME_INFO frame_info;
-        
-        HRESULT hr = desktop_duplication->AcquireNextFrame(50, &frame_info, &desktop_resource);
-        if (FAILED(hr)) return {};
-        
-        // Get texture interface
-        ID3D11Texture2D* desktop_texture = nullptr;
-        hr = desktop_resource->QueryInterface(__uuidof(ID3D11Texture2D), (void**)&desktop_texture);
-        if (FAILED(hr)) {
-            desktop_resource->Release();
-            desktop_duplication->ReleaseFrame();
+        if (!memory_dc || !h_bitmap) return {};
+
+        HDC screen_dc = GetDC(nullptr);
+        if (!screen_dc) return {};
+
+        // Copy the screen into the memory device context
+        BitBlt(memory_dc, 0, 0, screen_width, screen_height, screen_dc, 0, 0,
+               SRCCOPY | CAPTUREBLT);
+        ReleaseDC(nullptr, screen_dc);
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = screen_width;
+        // Negative height to get a top-down DIB
+        bmi.bmiHeader.biHeight = -screen_height;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        std::vector<BYTE> buffer(screen_width * screen_height * 4);
+        if (!GetDIBits(memory_dc, h_bitmap, 0, screen_height, buffer.data(), &bmi,
+                       DIB_RGB_COLORS)) {
             return {};
         }
-        
-        // Create staging texture for CPU access
-        D3D11_TEXTURE2D_DESC texture_desc;
-        desktop_texture->GetDesc(&texture_desc);
-        texture_desc.Usage = D3D11_USAGE_STAGING;
-        texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        texture_desc.BindFlags = 0;
-        texture_desc.MiscFlags = 0;
-        
-        ID3D11Texture2D* staging_texture = nullptr;
-        hr = d3d_device->CreateTexture2D(&texture_desc, nullptr, &staging_texture);
-        if (FAILED(hr)) {
-            desktop_texture->Release();
-            desktop_resource->Release();
-            desktop_duplication->ReleaseFrame();
-            return {};
-        }
-        
-        // Copy to staging
-        d3d_context->CopyResource(staging_texture, desktop_texture);
-        
-        // Map staging texture
-        D3D11_MAPPED_SUBRESOURCE mapped_resource;
-        hr = d3d_context->Map(staging_texture, 0, D3D11_MAP_READ, 0, &mapped_resource);
-        if (FAILED(hr)) {
-            staging_texture->Release();
-            desktop_texture->Release();
-            desktop_resource->Release();
-            desktop_duplication->ReleaseFrame();
-            return {};
-        }
-        
-        // Extract RGB data
+
+        // Convert BGRA buffer to RGB vector for transmission
         std::vector<BYTE> frame_data;
-        BYTE* source = static_cast<BYTE*>(mapped_resource.pData);
-        
-        for (int y = 0; y < screen_height; y++) {
-            for (int x = 0; x < screen_width; x++) {
-                int offset = y * mapped_resource.RowPitch + x * 4; // BGRA format
-                frame_data.push_back(source[offset + 2]); // R
-                frame_data.push_back(source[offset + 1]); // G
-                frame_data.push_back(source[offset + 0]); // B
-            }
+        frame_data.reserve(screen_width * screen_height * 3);
+        for (int i = 0; i < screen_width * screen_height; ++i) {
+            frame_data.push_back(buffer[i * 4 + 2]); // R
+            frame_data.push_back(buffer[i * 4 + 1]); // G
+            frame_data.push_back(buffer[i * 4 + 0]); // B
         }
-        
-        // Cleanup
-        d3d_context->Unmap(staging_texture, 0);
-        staging_texture->Release();
-        desktop_texture->Release();
-        desktop_resource->Release();
-        desktop_duplication->ReleaseFrame();
-        
         return frame_data;
     }
-    
+
     int getWidth() const { return screen_width; }
     int getHeight() const { return screen_height; }
-    
+
     ~ScreenCapture() {
-        if (desktop_duplication) desktop_duplication->Release();
-        if (d3d_context) d3d_context->Release();
-        if (d3d_device) d3d_device->Release();
+        if (h_bitmap) DeleteObject(h_bitmap);
+        if (memory_dc) DeleteDC(memory_dc);
     }
 };
 

