@@ -231,11 +231,19 @@ public:
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 24;
         bmi.bmiHeader.biCompression = BI_RGB;
-        
-        int imageSize = screen_width * screen_height * 3;
-        std::vector<BYTE> frameData(imageSize);
-        
-        GetDIBits(hdcScreen, hBitmap, 0, screen_height, frameData.data(), &bmi, DIB_RGB_COLORS);
+
+        int stride = ((screen_width * 3 + 3) & ~3);
+        int imageSize = stride * screen_height;
+        std::vector<BYTE> rawData(imageSize);
+
+        GetDIBits(hdcMem, hBitmap, 0, screen_height, rawData.data(), &bmi, DIB_RGB_COLORS);
+
+        std::vector<BYTE> frameData(static_cast<size_t>(screen_width) * screen_height * 3);
+        for (int y = 0; y < screen_height; ++y) {
+            memcpy(frameData.data() + static_cast<size_t>(y) * screen_width * 3,
+                   rawData.data() + static_cast<size_t>(y) * stride,
+                   screen_width * 3);
+        }
         
         SelectObject(hdcMem, hOldBitmap);
         DeleteObject(hBitmap);

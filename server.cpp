@@ -686,11 +686,16 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, i
     
     void* pBits;
     HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
-    
+
     if (hBitmap && pBits) {
-        size_t expected_size = static_cast<size_t>(width) * height * 3;
-        size_t copy_size = std::min(screen_data.size(), expected_size);
-        memcpy(pBits, screen_data.data(), copy_size);
+        int stride = ((width * 3 + 3) & ~3);
+        uint8_t* dst = static_cast<uint8_t*>(pBits);
+        const uint8_t* src = screen_data.data();
+        for (int y = 0; y < height; ++y) {
+            memcpy(dst + static_cast<size_t>(y) * stride,
+                   src + static_cast<size_t>(y) * width * 3,
+                   static_cast<size_t>(width) * 3);
+        }
     }
     
     ReleaseDC(nullptr, hdc);
