@@ -189,7 +189,12 @@ public:
         std::string data(payload.begin(), payload.end());
         size_t colon_pos = data.find(':');
         if (colon_pos != std::string::npos) {
-            return {data.substr(0, colon_pos), data.substr(colon_pos + 1)};
+            std::string type = data.substr(0, colon_pos);
+            std::string value = data.substr(colon_pos + 1);
+            value.erase(std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) {
+                return ch != '\0';
+            }).base(), value.end());
+            return {type, value};
         }
         return {"", ""};
     }
