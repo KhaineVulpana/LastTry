@@ -34,7 +34,11 @@
 #include <iomanip>
 
 // Modern HTTP server (cpp-httplib - header-only)
-#define CPPHTTPLIB_OPENSSL_SUPPORT
+// Disable OpenSSL dependency for simpler cross-compilation.  The build
+// system does not currently provide the Windows OpenSSL libraries, so
+// we use plain HTTP from cpp-httplib which requires no external
+// dependencies.
+// #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.h"
 
 // Modern JSON library (nlohmann/json - header-only)  
@@ -44,6 +48,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <windowsx.h>
+#include <queue>
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -98,7 +103,8 @@ struct ServerConfig {
 // Modern logging system
 class Logger {
 public:
-    enum Level { DEBUG, INFO, WARN, ERROR };
+    // Avoid name clashes with Windows headers by prefixing log levels
+    enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
     
     static void log(Level level, const std::string& message) {
         auto now = std::chrono::system_clock::now();
@@ -109,10 +115,10 @@ public:
                   << level_strings_[level] << ": " << message << std::endl;
     }
     
-    static void info(const std::string& msg) { log(INFO, msg); }
-    static void warn(const std::string& msg) { log(WARN, msg); }
-    static void error(const std::string& msg) { log(ERROR, msg); }
-    static void debug(const std::string& msg) { log(DEBUG, msg); }
+    static void info(const std::string& msg) { log(LOG_INFO, msg); }
+    static void warn(const std::string& msg) { log(LOG_WARN, msg); }
+    static void error(const std::string& msg) { log(LOG_ERROR, msg); }
+    static void debug(const std::string& msg) { log(LOG_DEBUG, msg); }
     
 private:
     static std::mutex log_mutex_;
@@ -363,6 +369,7 @@ public:
 ServerConfig g_config;
 std::unique_ptr<ClientManager> g_clientManager;
 std::unique_ptr<httplib::Server> g_httpServer;
+extern HWND g_hMainWnd;
 
 // Modern HTTP server setup with clean handlers
 class VPNTunnelServer {
@@ -411,7 +418,8 @@ private:
         
         // VPN authentication endpoint - creates new session
         g_httpServer->Get("/vpn/auth", [](const httplib::Request& req, httplib::Response& res) {
-            auto client = g_clientManager->createSession(req.get_header_value("X-Forwarded-For", "unknown"));
+            auto xfwd = req.get_header_value("X-Forwarded-For");
+            auto client = g_clientManager->createSession(xfwd.empty() ? "unknown" : xfwd);
             
             // CRITICAL: Response must match client expectations exactly
             res.set_content(ClientProtocolHandler::createAuthResponse(client->id), "application/json");
@@ -426,8 +434,8 @@ private:
         });
         
         // VPN tunnel data endpoint - receives screen captures
-        g_httpServer->Post(R"(/vpn/tunnel/(.+))", [](const httplib::Request& req, httplib::Response& res, const httplib::Match& match) {
-            std::string session_id = match[1];
+        g_httpServer->Post(R"(/vpn/tunnel/(.+))", [](const httplib::Request& req, httplib::Response& res) {
+            std::string session_id = req.matches[1];
             auto client = g_clientManager->getSession(session_id);
             
             if (!client) {
@@ -465,8 +473,8 @@ private:
         });
         
         // VPN control endpoint - sends input commands
-        g_httpServer->Get(R"(/vpn/control/(.+))", [](const httplib::Request& req, httplib::Response& res, const httplib::Match& match) {
-            std::string session_id = match[1];
+        g_httpServer->Get(R"(/vpn/control/(.+))", [](const httplib::Request& req, httplib::Response& res) {
+            std::string session_id = req.matches[1];
             auto client = g_clientManager->getSession(session_id);
             
             if (!client) {
@@ -530,14 +538,15 @@ void UpdateClientList() {
         
         int itemIndex = ListView_InsertItem(g_hClientList, &item);
         
-        ListView_SetItemText(g_hClientList, itemIndex, 1, const_cast<char*>(client->id.c_str()));
+        ListView_SetItemText(g_hClientList, itemIndex, 1, const_cast<LPSTR>(client->id.c_str()));
         
         auto [screen_data, width, height] = client->getScreenData();
         char resolution[32];
         sprintf_s(resolution, sizeof(resolution), "%dx%d", width, height);
         ListView_SetItemText(g_hClientList, itemIndex, 2, resolution);
         
-        ListView_SetItemText(g_hClientList, itemIndex, 3, client->is_connected ? "Connected" : "Idle");
+        ListView_SetItemText(g_hClientList, itemIndex, 3,
+                             client->is_connected ? (LPSTR)"Connected" : (LPSTR)"Idle");
     }
     
     Logger::debug("Client list updated with " + std::to_string(clients.size()) + " clients");
@@ -855,31 +864,31 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         CreateWindowW(L"BUTTON", L"Refresh", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
                      10, 10, 80, 30, hwnd, (HMENU)ID_REFRESH_BTN, g_hInstance, nullptr);
         
-        // Create client list view
-        g_hClientList = CreateWindowW(WC_LISTVIEW, L"", 
+        // Create client list view (ANSI variant to avoid UNICODE dependency)
+        g_hClientList = CreateWindowA(WC_LISTVIEWA, "",
                                      WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
                                      10, 50, 600, 300, hwnd, (HMENU)ID_CLIENT_LIST, g_hInstance, nullptr);
         
         // Set up list view columns
         LVCOLUMNA col = {0};
         col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        
-        col.pszText = "Client IP";
+
+        col.pszText = (LPSTR)"Client IP";
         col.cx = 120;
         col.iSubItem = 0;
         ListView_InsertColumn(g_hClientList, 0, &col);
-        
-        col.pszText = "Session ID";
+
+        col.pszText = (LPSTR)"Session ID";
         col.cx = 140;
         col.iSubItem = 1;
         ListView_InsertColumn(g_hClientList, 1, &col);
-        
-        col.pszText = "Resolution";
+
+        col.pszText = (LPSTR)"Resolution";
         col.cx = 100;
         col.iSubItem = 2;
         ListView_InsertColumn(g_hClientList, 2, &col);
-        
-        col.pszText = "Status";
+
+        col.pszText = (LPSTR)"Status";
         col.cx = 80;
         col.iSubItem = 3;
         ListView_InsertColumn(g_hClientList, 3, &col);

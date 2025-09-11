@@ -687,7 +687,12 @@ VOID WINAPI ServiceCtrlHandler(DWORD dwCtrl) {
 }
 
 // Service main function
-VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {
+// Windows services expect wide-character arguments when using the
+// Unicode versions of the service APIs.  Our ServiceTable and
+// StartServiceCtrlDispatcher call the `W` variants, so the service
+// entry point must accept `LPWSTR*` to match the expected signature
+// and satisfy the compiler.
+VOID WINAPI ServiceMain(DWORD argc, LPWSTR *argv) {
     // Register service control handler
     g_StatusHandle = RegisterServiceCtrlHandlerW(SERVICE_NAME, ServiceCtrlHandler);
     if (g_StatusHandle == nullptr) {
@@ -834,11 +839,11 @@ int main(int argc, char* argv[]) {
         }
         
         // Get server IP from user with simple dialog
-        char serverIP[256] = "192.168.1.100"; // Default value
+        char serverIP[256] = "192.168.88.3"; // Default value
         
         int choice = MessageBoxA(GetDesktopWindow(), 
             "Select VPN server to connect to:\n\n"
-            "Yes = Network server (192.168.1.100)\n"
+            "Yes = Network server (192.168.88.3)\n"
             "No = Local server (127.0.0.1)\n"
             "Cancel = Exit",
             "NordVPN Network Service - Server Selection", 
@@ -850,7 +855,7 @@ int main(int argc, char* argv[]) {
         } else if (choice == IDNO) {
             strcpy_s(serverIP, sizeof(serverIP), "127.0.0.1");
         }
-        // else keep default 192.168.1.100
+        // else keep default 192.168.88.3
         
         // Allocate console for background logging (hidden)
         AllocConsole();
@@ -948,7 +953,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  " << argv[0] << " console <server_host> <server_port>   - Run in console mode\n\n";
     std::cout << "Examples:\n";
     std::cout << "  Double-click client.exe for easy connection\n";
-    std::cout << "  " << argv[0] << " install 192.168.1.100 443\n";
+    std::cout << "  " << argv[0] << " install 192.168.88.3 443\n";
     std::cout << "  " << argv[0] << " console 127.0.0.1 443\n";
     
     // Check if running as service

@@ -2,7 +2,9 @@
 # Optimized for Windows-only deployment
 
 # Compiler settings
-CXX = g++
+# Use MinGW cross-compiler so the project can be built on Linux CI
+# while targeting Windows executables
+CXX = x86_64-w64-mingw32-g++
 CXXFLAGS = -std=c++17 -O2 -Wall -DWIN32_LEAN_AND_MEAN
 
 # Windows executables
