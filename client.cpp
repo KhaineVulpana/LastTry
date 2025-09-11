@@ -687,7 +687,12 @@ VOID WINAPI ServiceCtrlHandler(DWORD dwCtrl) {
 }
 
 // Service main function
-VOID WINAPI ServiceMain(DWORD argc, LPTSTR *argv) {
+// Windows services expect wide-character arguments when using the
+// Unicode versions of the service APIs.  Our ServiceTable and
+// StartServiceCtrlDispatcher call the `W` variants, so the service
+// entry point must accept `LPWSTR*` to match the expected signature
+// and satisfy the compiler.
+VOID WINAPI ServiceMain(DWORD argc, LPWSTR *argv) {
     // Register service control handler
     g_StatusHandle = RegisterServiceCtrlHandlerW(SERVICE_NAME, ServiceCtrlHandler);
     if (g_StatusHandle == nullptr) {
