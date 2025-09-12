@@ -462,19 +462,36 @@ public:
         : server_host(host), server_port(port), gen(rd()), tcp_socket(INVALID_SOCKET) {}
 
     bool initializeConnection() {
-        tcp_socket = socket(AF_INET, SOCK_STREAM, 0);
-        if (tcp_socket == INVALID_SOCKET) return false;
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
 
-        sockaddr_in server_addr{};
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(server_port);
-        inet_pton(AF_INET, server_host.c_str(), &server_addr.sin_addr);
-
-        if (connect(tcp_socket, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+        addrinfo* result = nullptr;
+        std::string port_str = std::to_string(server_port);
+        if (getaddrinfo(server_host.c_str(), port_str.c_str(), &hints, &result) != 0) {
             return false;
         }
 
-        DWORD timeout = 1000;
+        for (addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+            tcp_socket = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            if (tcp_socket == INVALID_SOCKET) continue;
+
+            if (connect(tcp_socket, rp->ai_addr, static_cast<int>(rp->ai_addrlen)) != SOCKET_ERROR) {
+                break;
+            }
+
+            closesocket(tcp_socket);
+            tcp_socket = INVALID_SOCKET;
+        }
+
+        freeaddrinfo(result);
+
+        if (tcp_socket == INVALID_SOCKET) {
+            return false;
+        }
+
+        DWORD timeout = 3000;
         setsockopt(tcp_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
         std::vector<BYTE> handshake_payload = TunnelProtocol::createTunnelPayload("handshake", "initiation");
