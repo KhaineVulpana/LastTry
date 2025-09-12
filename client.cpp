@@ -83,7 +83,8 @@ public:
                 count++;
             }
             
-            if (count >= 3 || current == 0) {
+            // Also encode literal 0xFF values to avoid sentinel conflicts
+            if (count >= 3 || current == 0 || current == 0xFF) {
                 compressed.push_back(0xFF);
                 compressed.push_back(count);
                 compressed.push_back(current);
