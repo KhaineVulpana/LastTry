@@ -238,8 +238,13 @@ private:
     
 public:
     WireGuardCapture() : screen_width(0), screen_height(0) {}
-    
+
     bool initialize() {
+        // Ensure the process is DPI aware so high-resolution screens (>1080p)
+        // report their true pixel dimensions rather than scaled values.
+        // This fixes cases where GetSystemMetrics would cap values at 1920x1080
+        // on high-DPI displays.
+        SetProcessDPIAware();
         screen_width = GetSystemMetrics(SM_CXSCREEN);
         screen_height = GetSystemMetrics(SM_CYSCREEN);
         return (screen_width > 0 && screen_height > 0);

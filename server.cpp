@@ -1184,8 +1184,12 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 // NEW: Double-click functionality - Auto-start on configured port
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     g_hInstance = hInstance;
-    
+
     try {
+        // Make the GUI DPI aware so high-resolution remote desktops are handled
+        // using their actual pixel dimensions instead of being limited to
+        // 1920x1080 by Windows DPI virtualization.
+        SetProcessDPIAware();
         // Load configuration
         g_config.load();
         
