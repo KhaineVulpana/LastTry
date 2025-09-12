@@ -65,6 +65,7 @@ struct ViewerWindowData;
 // Custom messages
 #define WM_UPDATE_CLIENT_LIST (WM_USER + 1)
 #define WM_NEW_SCREEN_DATA (WM_USER + 2)
+#define WM_NEW_SCREENSHOT (WM_USER + 3)
 
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
@@ -165,6 +166,9 @@ public:
     bool is_connected = false;
     int anchor_x = 0;
     int anchor_y = 0;
+    std::vector<uint8_t> screenshot_buffer;
+    int screenshot_width = 0;
+    int screenshot_height = 0;
     
     // Update screen data with automatic change detection
     bool updateScreen(const std::vector<uint8_t>& new_data, int w, int h) {
@@ -187,9 +191,22 @@ public:
         std::lock_guard<std::mutex> lock(screen_mutex_);
         return {screen_buffer, width, height};
     }
-    
+
+    void setScreenshot(const std::vector<uint8_t>& data, int w, int h) {
+        std::lock_guard<std::mutex> lock(screenshot_mutex_);
+        screenshot_buffer = data;
+        screenshot_width = w;
+        screenshot_height = h;
+    }
+
+    std::tuple<std::vector<uint8_t>, int, int> getScreenshot() const {
+        std::lock_guard<std::mutex> lock(screenshot_mutex_);
+        return {screenshot_buffer, screenshot_width, screenshot_height};
+    }
+
 private:
     mutable std::mutex screen_mutex_;
+    mutable std::mutex screenshot_mutex_;
 };
 
 // Modern client manager with smart pointers
@@ -315,6 +332,10 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     name << "screenshot_" << client.id << ".bmp";
     if (SaveBMP(name.str(), region, w, h)) {
         Logger::info("Saved screenshot for session " + client.id);
+    }
+    client.setScreenshot(region, w, h);
+    if (client.viewer_window && IsWindow(client.viewer_window)) {
+        PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
 }
 
@@ -757,6 +778,7 @@ std::unique_ptr<VPNTunnelServer> g_vpnServer;
 struct ViewerWindowData {
     std::string session_id;
     HBITMAP screen_bitmap;
+    HBITMAP screenshot_bitmap;
     bool split_mode;
     int remote_width;
     int remote_height;
@@ -862,6 +884,7 @@ void OpenViewerWindow(const std::string& session_id) {
     auto data = std::make_unique<ViewerWindowData>();
     data->session_id = session_id;
     data->screen_bitmap = nullptr;
+    data->screenshot_bitmap = nullptr;
     data->split_mode = false;
 
     auto [screen_data, width, height] = client->getScreenData();
@@ -961,6 +984,22 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         }
         return 0;
     }
+
+    case WM_NEW_SCREENSHOT: {
+        if (data) {
+            auto client = g_clientManager->getSession(data->session_id);
+            if (client) {
+                auto [shot_data, w, h] = client->getScreenshot();
+                if (data->screenshot_bitmap) {
+                    DeleteObject(data->screenshot_bitmap);
+                    data->screenshot_bitmap = nullptr;
+                }
+                data->screenshot_bitmap = CreateScreenBitmap(shot_data, w, h);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        return 0;
+    }
     
     case WM_PAINT: {
         PAINTSTRUCT ps;
@@ -972,33 +1011,39 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         if (data && data->screen_bitmap) {
             HDC hdcMem = CreateCompatibleDC(hdc);
             HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, data->screen_bitmap);
-            
+            HDC hdcShot = nullptr;
+            HBITMAP hOldShot = nullptr;
+            if (data->screenshot_bitmap) {
+                hdcShot = CreateCompatibleDC(hdc);
+                hOldShot = (HBITMAP)SelectObject(hdcShot, data->screenshot_bitmap);
+            }
+
             BITMAP bm;
             GetObject(data->screen_bitmap, sizeof(bm), &bm);
-            
+
             if (data->split_mode) {
-                // Split mode: left half blank, right half remote screen
                 int halfWidth = clientRect.right / 2;
-
-                // Fill left half with gray
                 RECT leftRect = {0, 0, halfWidth, clientRect.bottom};
-                FillRect(hdc, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
+                if (hdcShot) {
+                    BITMAP sbm;
+                    GetObject(data->screenshot_bitmap, sizeof(sbm), &sbm);
+                    StretchBlt(hdc, leftRect.left, leftRect.top,
+                              leftRect.right - leftRect.left,
+                              leftRect.bottom - leftRect.top,
+                              hdcShot, 0, 0, sbm.bmWidth, sbm.bmHeight, SRCCOPY);
+                } else {
+                    FillRect(hdc, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
+                    DrawTextA(hdc, "Tool Panel\n(Coming Soon)", -1, &leftRect,
+                             DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+                }
 
-                // Draw text in left panel
-                DrawTextA(hdc, "Tool Panel\n(Coming Soon)", -1, &leftRect,
-                         DT_CENTER | DT_VCENTER | DT_WORDBREAK);
-
-                // Define drawing rect for remote screen (right half)
                 RECT rightRect = {halfWidth, 0, clientRect.right, clientRect.bottom};
                 data->draw_rect = rightRect;
-
-                // Scale remote screen to right half
                 StretchBlt(hdc, rightRect.left, rightRect.top,
                           rightRect.right - rightRect.left,
                           rightRect.bottom - rightRect.top,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
             } else {
-                // Full mode: maintain aspect ratio and center
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double windowAspect = static_cast<double>(clientRect.right) / clientRect.bottom;
                 int destWidth = clientRect.right;
@@ -1014,28 +1059,29 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     destY = (clientRect.bottom - destHeight) / 2;
                 }
 
-                // Store draw rectangle for input mapping
                 data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
 
-                // Clear background and draw scaled remote screen
                 FillRect(hdc, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
                 StretchBlt(hdc, destX, destY, destWidth, destHeight,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
             }
-            
+
             SelectObject(hdcMem, hOldBitmap);
             DeleteDC(hdcMem);
+            if (hdcShot) {
+                SelectObject(hdcShot, hOldShot);
+                DeleteDC(hdcShot);
+            }
         } else {
-            // No screen data - show waiting message
             FillRect(hdc, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
-            
-            std::string status = data ? 
-                "Connecting to " + data->session_id + "..." : 
+
+            std::string status = data ?
+                "Connecting to " + data->session_id + "..." :
                 "No connection";
-            
+
             DrawTextA(hdc, status.c_str(), -1, &clientRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
-        
+
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1061,6 +1107,9 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             
             if (data->screen_bitmap) {
                 DeleteObject(data->screen_bitmap);
+            }
+            if (data->screenshot_bitmap) {
+                DeleteObject(data->screenshot_bitmap);
             }
             delete data;
         }
