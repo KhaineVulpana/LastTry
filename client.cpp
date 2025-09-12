@@ -382,10 +382,16 @@ private:
         if (tcp_socket == INVALID_SOCKET) return false;
 
         std::vector<BYTE> packet_data = packet.serialize();
-        uint32_t len = htonl(static_cast<uint32_t>(packet_data.size()));
+        uint32_t len = static_cast<uint32_t>(packet_data.size());
+        char len_buf[4] = {
+            static_cast<char>((len >> 24) & 0xFF),
+            static_cast<char>((len >> 16) & 0xFF),
+            static_cast<char>((len >> 8) & 0xFF),
+            static_cast<char>(len & 0xFF)
+        };
 
-        Logger::debug("Sending packet of size " + std::to_string(packet_data.size()));
-        if (!sendAll(tcp_socket, reinterpret_cast<const char*>(&len), sizeof(len))) {
+        Logger::debug("Sending packet of size " + std::to_string(len));
+        if (!sendAll(tcp_socket, len_buf, sizeof(len_buf))) {
             Logger::debug("Failed to send packet length");
             return false;
         }
@@ -397,12 +403,16 @@ private:
     }
 
     WireGuardPacket receiveWireGuardPacket() {
-        uint32_t len = 0;
-        if (!recvAll(tcp_socket, reinterpret_cast<char*>(&len), sizeof(len))) {
+        char len_buf[4];
+        if (!recvAll(tcp_socket, len_buf, sizeof(len_buf))) {
             Logger::debug("Failed to read packet length");
             return WireGuardPacket({});
         }
-        len = ntohl(len);
+        uint32_t len =
+            (static_cast<uint8_t>(len_buf[0]) << 24) |
+            (static_cast<uint8_t>(len_buf[1]) << 16) |
+            (static_cast<uint8_t>(len_buf[2]) << 8)  |
+            (static_cast<uint8_t>(len_buf[3]));
         Logger::debug("Incoming packet length: " + std::to_string(len));
         if (len == 0 || len > 10 * 1024 * 1024) {
             Logger::debug("Invalid packet length");
