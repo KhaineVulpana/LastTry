@@ -794,7 +794,9 @@ static void ToggleSplitScreen(ClientSession& client) {
         if (data) {
             data->split_mode = !data->split_mode;
             if (!data->split_mode) {
-                ShowWindow(client.viewer_window, SW_MAXIMIZE);
+                int screenW = GetSystemMetrics(SM_CXSCREEN);
+                int screenH = GetSystemMetrics(SM_CYSCREEN);
+                SetWindowPos(client.viewer_window, HWND_TOPMOST, 0, 0, screenW, screenH, SWP_SHOWWINDOW);
             }
             InvalidateRect(client.viewer_window, nullptr, TRUE);
         }
@@ -899,21 +901,24 @@ void OpenViewerWindow(const std::string& session_id) {
     sprintf_s(title, sizeof(title), "Remote Desktop - %s (%s)", 
              client->client_ip.c_str(), session_id.c_str());
     
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
     HWND hViewer = CreateWindowExA(
-        0,
+        WS_EX_TOPMOST,
         "VPNTunnelViewer",
         title,
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
+        WS_POPUP,
+        0, 0, screenW, screenH,
         nullptr, nullptr, g_hInstance, data.release() // Transfer ownership
     );
-    
+
     if (hViewer) {
         client->viewer_window = hViewer;
         client->is_connected = true;
-        ShowWindow(hViewer, SW_SHOW);
+        SetWindowPos(hViewer, HWND_TOPMOST, 0, 0, screenW, screenH, SWP_SHOWWINDOW);
         UpdateWindow(hViewer);
-        
+
         // Update screen if we already have data
         if (!screen_data.empty()) {
             ViewerWindowData* window_data = (ViewerWindowData*)GetWindowLongPtr(hViewer, GWLP_USERDATA);
