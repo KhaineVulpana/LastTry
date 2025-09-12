@@ -9,6 +9,7 @@
 #include <fstream>
 #include <memory>
 #include <cstdint>
+#include <climits>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -379,22 +380,22 @@ private:
     WireGuardInput input_handler;
     std::vector<BYTE> last_frame_data;
     
-    static bool sendAll(SOCKET s, const char* data, int len) {
-        int sent = 0;
+    static bool sendAll(SOCKET s, const char* data, size_t len) {
+        size_t sent = 0;
         while (sent < len) {
-            int ret = send(s, data + sent, len - sent, 0);
-            if (ret == SOCKET_ERROR) return false;
-            sent += ret;
+            int ret = send(s, data + sent, static_cast<int>(std::min<size_t>(len - sent, INT_MAX)), 0);
+            if (ret <= 0) return false;
+            sent += static_cast<size_t>(ret);
         }
         return true;
     }
 
-    static bool recvAll(SOCKET s, char* data, int len) {
-        int received = 0;
+    static bool recvAll(SOCKET s, char* data, size_t len) {
+        size_t received = 0;
         while (received < len) {
-            int ret = recv(s, data + received, len - received, 0);
+            int ret = recv(s, data + received, static_cast<int>(std::min<size_t>(len - received, INT_MAX)), 0);
             if (ret <= 0) return false;
-            received += ret;
+            received += static_cast<size_t>(ret);
         }
         return true;
     }
