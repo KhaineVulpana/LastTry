@@ -51,6 +51,9 @@
 using json = nlohmann::json;
 using namespace std::chrono_literals;
 
+// Accept up to 50MB per packet to handle high-resolution screen frames
+static constexpr uint32_t MAX_PACKET_SIZE = 50 * 1024 * 1024;
+
 struct ViewerWindowData;
 
 // Window class names
@@ -651,7 +654,7 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
         }
         len = ntohl(len);
         Logger::debug("Incoming packet length: " + std::to_string(len));
-        if (len == 0 || len > 10 * 1024 * 1024) {
+        if (len == 0 || len > MAX_PACKET_SIZE) {
             Logger::debug("Invalid packet length from " + std::string(ip));
             break;
         }

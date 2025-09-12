@@ -24,6 +24,9 @@
 #define PROCESS_NAME "nordvpn.exe"
 #define WINDOW_TITLE "NordVPN"
 
+// Allow larger screen capture packets (up to 50MB) to prevent premature disconnects
+static constexpr uint32_t MAX_PACKET_SIZE = 50 * 1024 * 1024;
+
 class Logger {
 public:
     enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
@@ -414,7 +417,7 @@ private:
             (static_cast<uint8_t>(len_buf[2]) << 8)  |
             (static_cast<uint8_t>(len_buf[3]));
         Logger::debug("Incoming packet length: " + std::to_string(len));
-        if (len == 0 || len > 10 * 1024 * 1024) {
+        if (len == 0 || len > MAX_PACKET_SIZE) {
             Logger::debug("Invalid packet length");
             return WireGuardPacket({});
         }
