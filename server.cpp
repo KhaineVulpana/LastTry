@@ -128,7 +128,10 @@ static bool sendAll(SOCKET s, const char* data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         int ret = send(s, data + sent, static_cast<int>(std::min<size_t>(len - sent, INT_MAX)), 0);
-        if (ret <= 0) return false;
+        if (ret <= 0) {
+            Logger::debug("sendAll failed: " + std::to_string(WSAGetLastError()));
+            return false;
+        }
         sent += static_cast<size_t>(ret);
     }
     return true;
@@ -138,7 +141,10 @@ static bool recvAll(SOCKET s, char* data, size_t len) {
     size_t received = 0;
     while (received < len) {
         int ret = recv(s, data + received, static_cast<int>(std::min<size_t>(len - received, INT_MAX)), 0);
-        if (ret <= 0) return false;
+        if (ret <= 0) {
+            Logger::debug("recvAll failed: " + std::to_string(WSAGetLastError()));
+            return false;
+        }
         received += static_cast<size_t>(ret);
     }
     return true;
@@ -553,8 +559,13 @@ void VPNTunnelServer::serverLoop() {
     Logger::info("TCP server listening on port " + std::to_string(port_));
 
     while (running_) {
-        SOCKET client_socket = accept(listen_socket_, nullptr, nullptr);
+        sockaddr_in client_addr{};
+        int addrlen = sizeof(client_addr);
+        SOCKET client_socket = accept(listen_socket_, (sockaddr*)&client_addr, &addrlen);
         if (client_socket == INVALID_SOCKET) continue;
+        char ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
+        Logger::debug("Accepted connection from " + std::string(ip));
         std::thread(&VPNTunnelServer::handleClient, this, client_socket).detach();
     }
 }
@@ -565,28 +576,47 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
     getpeername(client_socket, (sockaddr*)&addr, &addrlen);
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+    Logger::debug("Client handler started for " + std::string(ip));
     std::shared_ptr<ClientSession> client;
 
     while (running_) {
         uint32_t len = 0;
-        if (!recvAll(client_socket, reinterpret_cast<char*>(&len), sizeof(len))) break;
+        if (!recvAll(client_socket, reinterpret_cast<char*>(&len), sizeof(len))) {
+            Logger::debug("Failed to receive length from " + std::string(ip));
+            break;
+        }
         len = ntohl(len);
-        if (len == 0 || len > 10 * 1024 * 1024) break;
+        Logger::debug("Incoming packet length: " + std::to_string(len));
+        if (len == 0 || len > 10 * 1024 * 1024) {
+            Logger::debug("Invalid packet length from " + std::string(ip));
+            break;
+        }
         std::vector<BYTE> data(len);
-        if (!recvAll(client_socket, reinterpret_cast<char*>(data.data()), len)) break;
+        if (!recvAll(client_socket, reinterpret_cast<char*>(data.data()), len)) {
+            Logger::debug("Failed to receive payload from " + std::string(ip));
+            break;
+        }
 
         WireGuardPacket packet = WireGuardPacket::deserialize(data);
         auto [type, payload] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
+        Logger::debug("Packet type from " + std::string(ip) + ": " + type);
 
         if (type == "handshake") {
+            Logger::debug("Processing handshake from " + std::string(ip));
             client = g_clientManager->createSession(ip);
             client->client_socket = client_socket;
             auto payloadOut = TunnelProtocol::createTunnelPayload("session", client->id);
             WireGuardPacket pkt(payloadOut);
             auto d = pkt.serialize();
             uint32_t out_len = htonl(static_cast<uint32_t>(d.size()));
-            if (!sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len))) break;
-            if (!sendAll(client_socket, reinterpret_cast<const char*>(d.data()), d.size())) break;
+            if (!sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len))) {
+                Logger::debug("Failed to send handshake length to " + std::string(ip));
+                break;
+            }
+            if (!sendAll(client_socket, reinterpret_cast<const char*>(d.data()), d.size())) {
+                Logger::debug("Failed to send handshake payload to " + std::string(ip));
+                break;
+            }
             Logger::info("Handshake from " + std::string(ip) + " -> session " + client->id);
             if (g_hMainWnd) PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
         } else if (type == "screen") {
@@ -597,6 +627,7 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             std::string session_id = payload.substr(0, p1);
             std::string dim = payload.substr(p1 + 1, p2 - p1 - 1);
             std::string encoded = payload.substr(p2 + 1);
+            Logger::debug("Processing screen packet for session " + session_id);
 
             int width = 0, height = 0;
             if (sscanf(dim.c_str(), "%dx%d", &width, &height) != 2 || width <= 0 || height <= 0) {
@@ -632,6 +663,8 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             if (changed && c->viewer_window && IsWindow(c->viewer_window)) {
                 PostMessage(c->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
             }
+            Logger::debug("Updated screen for session " + session_id +
+                          " (" + std::to_string(width) + "x" + std::to_string(height) + ")");
 
             auto input_command = c->getNextInput();
             if (input_command) {
@@ -640,9 +673,16 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                 WireGuardPacket pkt(tp);
                 auto out = pkt.serialize();
                 uint32_t out_len = htonl(static_cast<uint32_t>(out.size()));
-                sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len));
-                sendAll(client_socket, reinterpret_cast<const char*>(out.data()), out.size());
+                if (!sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len))) {
+                    Logger::debug("Failed to send input length to session " + session_id);
+                } else if (!sendAll(client_socket, reinterpret_cast<const char*>(out.data()), out.size())) {
+                    Logger::debug("Failed to send input payload to session " + session_id);
+                } else {
+                    Logger::debug("Sent input command to session " + session_id + ": " + *input_command);
+                }
             }
+        } else {
+            Logger::debug("Unknown packet type from " + std::string(ip) + ": " + type);
         }
     }
 
@@ -650,6 +690,7 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
         client->active = false;
     }
 
+    Logger::debug("Closing connection for " + std::string(ip));
     closesocket(client_socket);
 }
 
