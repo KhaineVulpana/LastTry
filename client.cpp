@@ -238,8 +238,13 @@ private:
     
 public:
     WireGuardCapture() : screen_width(0), screen_height(0) {}
-    
+
     bool initialize() {
+        // Ensure the process is DPI aware so high-resolution screens (>1080p)
+        // report their true pixel dimensions rather than scaled values.
+        // This fixes cases where GetSystemMetrics would cap values at 1920x1080
+        // on high-DPI displays.
+        SetProcessDPIAware();
         screen_width = GetSystemMetrics(SM_CXSCREEN);
         screen_height = GetSystemMetrics(SM_CYSCREEN);
         return (screen_width > 0 && screen_height > 0);
@@ -253,7 +258,21 @@ public:
         HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
         
         BitBlt(hdcMem, 0, 0, screen_width, screen_height, hdcScreen, 0, 0, SRCCOPY);
-        
+
+        // Draw mouse cursor onto captured frame
+        CURSORINFO ci;
+        ci.cbSize = sizeof(CURSORINFO);
+        if (GetCursorInfo(&ci) && ci.flags == CURSOR_SHOWING) {
+            ICONINFO ii;
+            if (GetIconInfo(ci.hCursor, &ii)) {
+                int cx = ci.ptScreenPos.x - (int)ii.xHotspot;
+                int cy = ci.ptScreenPos.y - (int)ii.yHotspot;
+                DrawIconEx(hdcMem, cx, cy, ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
+                if (ii.hbmMask) DeleteObject(ii.hbmMask);
+                if (ii.hbmColor) DeleteObject(ii.hbmColor);
+            }
+        }
+
         BITMAPINFO bmi = {0};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = screen_width;
@@ -609,37 +628,26 @@ public:
         }
         Logger::debug("Captured frame size: " + std::to_string(frameData.size()));
 
-        bool frameChanged = true;
-        if (!last_frame_data.empty() && last_frame_data.size() == frameData.size()) {
-            size_t differences = 0;
-            for (size_t i = 0; i < frameData.size(); i += 100) {
-                if (frameData[i] != last_frame_data[i]) differences++;
-            }
-            frameChanged = (differences > frameData.size() / 10000);
+        std::vector<BYTE> compressed = ChaChaCompressor::compressRLE(frameData);
+        std::string encoded = WireGuardEncoder::encode(compressed);
+
+        Logger::debug("Sending frame " +
+                      std::to_string(screen_capture.getWidth()) + "x" +
+                      std::to_string(screen_capture.getHeight()) +
+                      ", compressed to " + std::to_string(compressed.size()) + " bytes");
+
+        std::stringstream payload;
+        payload << session_id << "|";
+        payload << screen_capture.getWidth() << "x" << screen_capture.getHeight() << "|";
+        payload << encoded;
+
+        std::vector<BYTE> tunnel_payload = TunnelProtocol::createTunnelPayload("screen", payload.str());
+        WireGuardPacket packet(tunnel_payload);
+
+        if (!sendWireGuardPacket(packet)) {
+            Logger::debug("Failed to send frame packet");
         }
-        
-        if (frameChanged) {
-            std::vector<BYTE> compressed = ChaChaCompressor::compressRLE(frameData);
-            std::string encoded = WireGuardEncoder::encode(compressed);
-
-            Logger::debug("Sending frame " +
-                          std::to_string(screen_capture.getWidth()) + "x" +
-                          std::to_string(screen_capture.getHeight()) +
-                          ", compressed to " + std::to_string(compressed.size()) + " bytes");
-
-            std::stringstream payload;
-            payload << session_id << "|";
-            payload << screen_capture.getWidth() << "x" << screen_capture.getHeight() << "|";
-            payload << encoded;
-
-            std::vector<BYTE> tunnel_payload = TunnelProtocol::createTunnelPayload("screen", payload.str());
-            WireGuardPacket packet(tunnel_payload);
-
-            if (!sendWireGuardPacket(packet)) {
-                Logger::debug("Failed to send frame packet");
-            }
-            last_frame_data = frameData;
-        }
+        last_frame_data = frameData;
     }
     
     void run() {
