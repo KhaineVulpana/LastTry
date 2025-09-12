@@ -1039,8 +1039,14 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             GetObject(data->screen_bitmap, sizeof(bm), &bm);
 
             if (data->split_mode) {
-                int halfWidth = clientRect.right / 2;
-                RECT leftRect = {0, 0, halfWidth, clientRect.bottom};
+                int barHeight = clientRect.bottom * 15 / 100;
+                RECT innerRect = {0, barHeight, clientRect.right, clientRect.bottom - barHeight};
+
+                // fill entire background black (top/bottom bars)
+                FillRect(hdcBuffer, &clientRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
+
+                int halfWidth = (innerRect.right - innerRect.left) / 2;
+                RECT leftRect = {0, innerRect.top, halfWidth, innerRect.bottom};
                 if (hdcShot) {
                     BITMAP sbm;
                     GetObject(data->screenshot_bitmap, sizeof(sbm), &sbm);
@@ -1054,11 +1060,27 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                              DT_CENTER | DT_VCENTER | DT_WORDBREAK);
                 }
 
-                RECT rightRect = {halfWidth, 0, clientRect.right, clientRect.bottom};
-                data->draw_rect = rightRect;
-                StretchBlt(hdcBuffer, rightRect.left, rightRect.top,
-                          rightRect.right - rightRect.left,
-                          rightRect.bottom - rightRect.top,
+                RECT rightArea = {halfWidth, innerRect.top, innerRect.right, innerRect.bottom};
+
+                double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
+                double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
+                                    (rightArea.bottom - rightArea.top);
+                int destWidth = rightArea.right - rightArea.left;
+                int destHeight = rightArea.bottom - rightArea.top;
+                int destX = rightArea.left;
+                int destY = rightArea.top;
+
+                if (areaAspect > remoteAspect) {
+                    destWidth = static_cast<int>((rightArea.bottom - rightArea.top) * remoteAspect);
+                    destX = rightArea.left + ( (rightArea.right - rightArea.left - destWidth) / 2 );
+                } else {
+                    destHeight = static_cast<int>((rightArea.right - rightArea.left) / remoteAspect);
+                    destY = rightArea.top + ( (rightArea.bottom - rightArea.top - destHeight) / 2 );
+                }
+
+                data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
+
+                StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
             } else {
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
@@ -1078,7 +1100,7 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
                 data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
 
-                FillRect(hdcBuffer, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
+                FillRect(hdcBuffer, &clientRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
                 StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
             }

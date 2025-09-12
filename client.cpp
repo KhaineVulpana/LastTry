@@ -549,26 +549,24 @@ public:
     }
 
     void detectAndSendMouseEvents() {
-        static bool prevRight = false;
-        static bool prevMiddle = false;
+        static bool middleHeld = false;
         static std::chrono::steady_clock::time_point middleDownTime;
         static POINT middlePos{0,0};
 
-        SHORT rightState = GetAsyncKeyState(VK_RBUTTON);
-        bool rightDown = (rightState & 0x8000) != 0;
-        if (rightDown && !prevRight) {
+        // Use low-order bit of GetAsyncKeyState so clicks aren't missed
+        if (GetAsyncKeyState(VK_RBUTTON) & 0x0001) {
             sendMouseEvent("right");
         }
-        prevRight = rightDown;
 
         SHORT midState = GetAsyncKeyState(VK_MBUTTON);
         bool midDown = (midState & 0x8000) != 0;
         auto now = std::chrono::steady_clock::now();
-        if (midDown && !prevMiddle) {
+        if (midDown && !middleHeld) {
+            middleHeld = true;
             middleDownTime = now;
             GetCursorPos(&middlePos);
         }
-        if (!midDown && prevMiddle) {
+        if (!midDown && middleHeld) {
             auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - middleDownTime).count();
             if (duration > 800) {
                 sendMouseEvent("long_middle");
@@ -577,8 +575,8 @@ public:
                 ss << "middle:" << middlePos.x << "," << middlePos.y;
                 sendMouseEvent(ss.str());
             }
+            middleHeld = false;
         }
-        prevMiddle = midDown;
     }
     
     void run() {
@@ -602,8 +600,13 @@ public:
                         sendDesktopFrame();
                         detectAndSendMouseEvents();
                         
-                        // Reduce delay to increase screen update rate (~60 FPS)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                        // Wait ~16ms but wake immediately on mouse input
+                        MSG msg;
+                        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+                            TranslateMessage(&msg);
+                            DispatchMessage(&msg);
+                        }
+                        MsgWaitForMultipleObjects(0, NULL, FALSE, 16, QS_MOUSE);
                         
                         static int health_check = 0;
                         if (++health_check % 2000 == 0) {
