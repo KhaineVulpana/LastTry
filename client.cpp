@@ -13,15 +13,10 @@
 #include <mutex>
 #include <iomanip>
 
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "user32.lib")
 #include <mmsystem.h>
-#pragma comment(lib, "winmm.lib")
 
 #define PROCESS_NAME "nordvpn.exe"
 #define WINDOW_TITLE "NordVPN"
