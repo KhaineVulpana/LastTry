@@ -794,7 +794,9 @@ static void ToggleSplitScreen(ClientSession& client) {
         if (data) {
             data->split_mode = !data->split_mode;
             if (!data->split_mode) {
-                ShowWindow(client.viewer_window, SW_MAXIMIZE);
+                int screenW = GetSystemMetrics(SM_CXSCREEN);
+                int screenH = GetSystemMetrics(SM_CYSCREEN);
+                SetWindowPos(client.viewer_window, HWND_TOPMOST, 0, 0, screenW, screenH, SWP_SHOWWINDOW);
             }
             InvalidateRect(client.viewer_window, nullptr, TRUE);
         }
@@ -899,21 +901,24 @@ void OpenViewerWindow(const std::string& session_id) {
     sprintf_s(title, sizeof(title), "Remote Desktop - %s (%s)", 
              client->client_ip.c_str(), session_id.c_str());
     
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
     HWND hViewer = CreateWindowExA(
-        0,
+        WS_EX_TOPMOST,
         "VPNTunnelViewer",
         title,
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
+        WS_POPUP,
+        0, 0, screenW, screenH,
         nullptr, nullptr, g_hInstance, data.release() // Transfer ownership
     );
-    
+
     if (hViewer) {
         client->viewer_window = hViewer;
         client->is_connected = true;
-        ShowWindow(hViewer, SW_SHOW);
+        SetWindowPos(hViewer, HWND_TOPMOST, 0, 0, screenW, screenH, SWP_SHOWWINDOW);
         UpdateWindow(hViewer);
-        
+
         // Update screen if we already have data
         if (!screen_data.empty()) {
             ViewerWindowData* window_data = (ViewerWindowData*)GetWindowLongPtr(hViewer, GWLP_USERDATA);
@@ -1003,21 +1008,30 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         }
         return 0;
     }
-    
+
+    case WM_ERASEBKGND:
+        // Prevent flicker by avoiding default background erasing
+        return 1;
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
-        
+
         RECT clientRect;
         GetClientRect(hwnd, &clientRect);
-        
+
+        // Double buffering to eliminate flashing when redrawing
+        HDC hdcBuffer = CreateCompatibleDC(hdc);
+        HBITMAP hbmBuffer = CreateCompatibleBitmap(hdc, clientRect.right, clientRect.bottom);
+        HBITMAP hbmOldBuffer = (HBITMAP)SelectObject(hdcBuffer, hbmBuffer);
+
         if (data && data->screen_bitmap) {
-            HDC hdcMem = CreateCompatibleDC(hdc);
+            HDC hdcMem = CreateCompatibleDC(hdcBuffer);
             HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, data->screen_bitmap);
             HDC hdcShot = nullptr;
             HBITMAP hOldShot = nullptr;
             if (data->screenshot_bitmap) {
-                hdcShot = CreateCompatibleDC(hdc);
+                hdcShot = CreateCompatibleDC(hdcBuffer);
                 hOldShot = (HBITMAP)SelectObject(hdcShot, data->screenshot_bitmap);
             }
 
@@ -1030,19 +1044,19 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 if (hdcShot) {
                     BITMAP sbm;
                     GetObject(data->screenshot_bitmap, sizeof(sbm), &sbm);
-                    StretchBlt(hdc, leftRect.left, leftRect.top,
+                    StretchBlt(hdcBuffer, leftRect.left, leftRect.top,
                               leftRect.right - leftRect.left,
                               leftRect.bottom - leftRect.top,
                               hdcShot, 0, 0, sbm.bmWidth, sbm.bmHeight, SRCCOPY);
                 } else {
-                    FillRect(hdc, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
-                    DrawTextA(hdc, "Tool Panel\n(Coming Soon)", -1, &leftRect,
+                    FillRect(hdcBuffer, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
+                    DrawTextA(hdcBuffer, "Tool Panel\n(Coming Soon)", -1, &leftRect,
                              DT_CENTER | DT_VCENTER | DT_WORDBREAK);
                 }
 
                 RECT rightRect = {halfWidth, 0, clientRect.right, clientRect.bottom};
                 data->draw_rect = rightRect;
-                StretchBlt(hdc, rightRect.left, rightRect.top,
+                StretchBlt(hdcBuffer, rightRect.left, rightRect.top,
                           rightRect.right - rightRect.left,
                           rightRect.bottom - rightRect.top,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
@@ -1064,8 +1078,8 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
                 data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
 
-                FillRect(hdc, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
-                StretchBlt(hdc, destX, destY, destWidth, destHeight,
+                FillRect(hdcBuffer, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
+                StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
             }
 
@@ -1076,14 +1090,22 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 DeleteDC(hdcShot);
             }
         } else {
-            FillRect(hdc, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
+            FillRect(hdcBuffer, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
 
             std::string status = data ?
                 "Connecting to " + data->session_id + "..." :
                 "No connection";
 
-            DrawTextA(hdc, status.c_str(), -1, &clientRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextA(hdcBuffer, status.c_str(), -1, &clientRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
+
+        // Blit the offscreen buffer to the window in one operation
+        BitBlt(hdc, 0, 0, clientRect.right, clientRect.bottom, hdcBuffer, 0, 0, SRCCOPY);
+
+        // Cleanup buffer objects
+        SelectObject(hdcBuffer, hbmOldBuffer);
+        DeleteObject(hbmBuffer);
+        DeleteDC(hdcBuffer);
 
         EndPaint(hwnd, &ps);
         return 0;
