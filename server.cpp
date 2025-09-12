@@ -1137,6 +1137,14 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             HDC hdcMem = CreateCompatibleDC(hdcBuffer);
             HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, data->screen_bitmap);
 
+            // Optional screenshot bitmap drawing context
+            HDC hdcShot = nullptr;
+            HBITMAP hOldShot = nullptr;
+            if (data->screenshot_bitmap) {
+                hdcShot = CreateCompatibleDC(hdcBuffer);
+                hOldShot = (HBITMAP)SelectObject(hdcShot, data->screenshot_bitmap);
+            }
+
             BITMAP bm;
             GetObject(data->screen_bitmap, sizeof(bm), &bm);
 
@@ -1145,18 +1153,18 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 FillRect(hdcBuffer, &clientRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
                 int leftWidth = clientRect.right * 40 / 100;
                 RECT rightArea = {leftWidth, 0, clientRect.right, clientRect.bottom};
-                RECT leftRect = {0, innerRect.top, leftWidth, clientRect.bottom};
-                FillRect(hdcBuffer, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
+                RECT leftPanelRect = {0, 0, leftWidth, clientRect.bottom};
+                FillRect(hdcBuffer, &leftPanelRect, (HBRUSH)(COLOR_BTNFACE + 1));
 
                 std::string codexText;
                 if (auto client = g_clientManager->getSession(data->session_id)) {
                     codexText = client->getCodexResponse();
                 }
                 if (!codexText.empty()) {
-                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &leftRect,
+                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &leftPanelRect,
                               DT_LEFT | DT_TOP | DT_WORDBREAK);
                 } else {
-                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &leftRect,
+                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &leftPanelRect,
                               DT_CENTER | DT_VCENTER | DT_WORDBREAK);
                 }
 
@@ -1228,6 +1236,11 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 FillRect(hdcBuffer, &clientRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
                 StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+            }
+
+            if (hdcShot) {
+                SelectObject(hdcShot, hOldShot);
+                DeleteDC(hdcShot);
             }
 
             SelectObject(hdcMem, hOldBitmap);
