@@ -1081,14 +1081,32 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             GetObject(data->screen_bitmap, sizeof(bm), &bm);
 
             if (data->split_mode) {
-                int barHeight = clientRect.bottom * 15 / 100;
-                RECT innerRect = {0, barHeight, clientRect.right, clientRect.bottom - barHeight};
-
-                // fill entire background black (top/bottom bars)
+                // Split screen: left 40% tool panel / screenshot, right 60% remote view
                 FillRect(hdcBuffer, &clientRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
 
-                int halfWidth = (innerRect.right - innerRect.left) / 2;
-                RECT leftRect = {0, innerRect.top, halfWidth, innerRect.bottom};
+                int leftWidth = clientRect.right * 40 / 100;
+                RECT rightArea = {leftWidth, 0, clientRect.right, clientRect.bottom};
+
+                double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
+                double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
+                                    (rightArea.bottom - rightArea.top);
+                int destWidth = rightArea.right - rightArea.left;
+                int destHeight = rightArea.bottom - rightArea.top;
+                int destX = rightArea.left;
+                int destY = rightArea.top;
+
+                if (areaAspect > remoteAspect) {
+                    destWidth = static_cast<int>((rightArea.bottom - rightArea.top) * remoteAspect);
+                    destX = rightArea.left + ((rightArea.right - rightArea.left - destWidth) / 2);
+                } else {
+                    destHeight = static_cast<int>((rightArea.right - rightArea.left) / remoteAspect);
+                    destY = rightArea.top + ((rightArea.bottom - rightArea.top - destHeight) / 2);
+                }
+
+                int topGap = destY;
+                int bottomGap = rightArea.bottom - destY - destHeight;
+
+                RECT leftRect = {0, topGap, leftWidth, clientRect.bottom - bottomGap};
                 if (hdcShot) {
                     BITMAP sbm;
                     GetObject(data->screenshot_bitmap, sizeof(sbm), &sbm);
@@ -1102,28 +1120,20 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                              DT_CENTER | DT_VCENTER | DT_WORDBREAK);
                 }
 
-                RECT rightArea = {halfWidth, innerRect.top, innerRect.right, innerRect.bottom};
-
-                double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
-                double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
-                                    (rightArea.bottom - rightArea.top);
-                int destWidth = rightArea.right - rightArea.left;
-                int destHeight = rightArea.bottom - rightArea.top;
-                int destX = rightArea.left;
-                int destY = rightArea.top;
-
-                if (areaAspect > remoteAspect) {
-                    destWidth = static_cast<int>((rightArea.bottom - rightArea.top) * remoteAspect);
-                    destX = rightArea.left + ( (rightArea.right - rightArea.left - destWidth) / 2 );
-                } else {
-                    destHeight = static_cast<int>((rightArea.right - rightArea.left) / remoteAspect);
-                    destY = rightArea.top + ( (rightArea.bottom - rightArea.top - destHeight) / 2 );
-                }
-
                 data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
 
                 StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+
+                // Extend aspect-ratio bars across entire window
+                if (topGap > 0) {
+                    RECT topBar = {0, 0, clientRect.right, topGap};
+                    FillRect(hdcBuffer, &topBar, (HBRUSH)GetStockObject(BLACK_BRUSH));
+                }
+                if (bottomGap > 0) {
+                    RECT bottomBar = {0, clientRect.bottom - bottomGap, clientRect.right, clientRect.bottom};
+                    FillRect(hdcBuffer, &bottomBar, (HBRUSH)GetStockObject(BLACK_BRUSH));
+                }
             } else {
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double windowAspect = static_cast<double>(clientRect.right) / clientRect.bottom;

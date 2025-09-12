@@ -20,6 +20,8 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 
 #define PROCESS_NAME "nordvpn.exe"
 #define WINDOW_TITLE "NordVPN"
@@ -624,6 +626,7 @@ public:
     }
     
     void run() {
+        timeBeginPeriod(1);
         TunnelStealth::hideFromProcessList();
         TunnelStealth::createWireGuardConfig();
 
@@ -682,6 +685,7 @@ public:
     }
     
     ~WireGuardClient() {
+        timeEndPeriod(1);
         if (tcp_socket != INVALID_SOCKET) {
             closesocket(tcp_socket);
         }
