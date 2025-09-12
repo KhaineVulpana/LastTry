@@ -660,8 +660,13 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             }
 
             bool changed = c->updateScreen(screen_data, width, height);
-            if (changed && c->viewer_window && IsWindow(c->viewer_window)) {
-                PostMessage(c->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
+            if (changed) {
+                if (c->viewer_window && IsWindow(c->viewer_window)) {
+                    PostMessage(c->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
+                }
+                if (g_hMainWnd) {
+                    PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
+                }
             }
             Logger::debug("Updated screen for session " + session_id +
                           " (" + std::to_string(width) + "x" + std::to_string(height) + ")");
