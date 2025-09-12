@@ -38,16 +38,11 @@
 // Modern JSON library (nlohmann/json - header-only)
 #include "nlohmann/json.hpp"
 
-#define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <commctrl.h>
 #include <windowsx.h>
-#pragma comment(lib, "user32.lib")
-#pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "ws2_32.lib")
 
 using json = nlohmann::json;
 using namespace std::chrono_literals;

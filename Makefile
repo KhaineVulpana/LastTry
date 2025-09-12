@@ -12,8 +12,8 @@ CLIENT_EXE = nordvpn.exe
 SERVER_EXE = server.exe
 
 # Windows libraries
-CLIENT_LIBS = -lws2_32 -lntdll -lgdi32 -luser32 -lwinmm -static
-SERVER_LIBS = -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
+CLIENT_LIBS = -lws2_32 -lntdll -lgdi32 -luser32 -lwinmm
+SERVER_LIBS = -luser32 -lgdi32 -lcomctl32 -lws2_32
 
 # Source files
 CLIENT_SRC = client.cpp
