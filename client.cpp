@@ -236,15 +236,8 @@ public:
         int imageSize = stride * screen_height;
         std::vector<BYTE> rawData(imageSize);
 
-        if (GetDIBits(hdcMem, hBitmap, 0, screen_height, rawData.data(), &bmi, DIB_RGB_COLORS) == 0) {
-            std::cerr << "GetDIBits failed: " << GetLastError() << std::endl;
-            SelectObject(hdcMem, hOldBitmap);
-            DeleteObject(hBitmap);
-            DeleteDC(hdcMem);
-            ReleaseDC(nullptr, hdcScreen);
-            return {};
-        }
-
+        GetDIBits(hdcMem, hBitmap, 0, screen_height, rawData.data(), &bmi, DIB_RGB_COLORS);
+            
         std::vector<BYTE> frameData(static_cast<size_t>(screen_width) * screen_height * 3);
         for (int y = 0; y < screen_height; ++y) {
             memcpy(frameData.data() + static_cast<size_t>(y) * screen_width * 3,
