@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <climits>
 #include <cstdio>
+#include <cstring>
 
 // Modern JSON library (nlohmann/json - header-only)
 #include "nlohmann/json.hpp"
@@ -186,6 +187,40 @@ public:
             Logger::debug("Screen updated for " + id + ": " + std::to_string(w) + "x" + std::to_string(h));
         }
         
+        return changed;
+    }
+
+    bool applyScreenDiff(const std::vector<uint8_t>& diff, int w, int h,
+                         int x, int y, int rw, int rh) {
+        std::lock_guard<std::mutex> lock(screen_mutex_);
+
+        bool size_changed = (width != w || height != h ||
+                             screen_buffer.size() != static_cast<size_t>(w) * h * 3);
+        if (size_changed) {
+            width = w;
+            height = h;
+            screen_buffer.assign(static_cast<size_t>(w) * h * 3, 0);
+        }
+
+        bool changed = false;
+        for (int row = 0; row < rh; ++row) {
+            size_t dest_off = (static_cast<size_t>(y + row) * w + x) * 3;
+            size_t src_off = static_cast<size_t>(row) * rw * 3;
+            uint8_t* dest = screen_buffer.data() + dest_off;
+            const uint8_t* src = diff.data() + src_off;
+            if (memcmp(dest, src, static_cast<size_t>(rw) * 3) != 0) {
+                memcpy(dest, src, static_cast<size_t>(rw) * 3);
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            last_seen = std::chrono::system_clock::now();
+            Logger::debug("Screen diff applied for " + id +
+                          ": region " + std::to_string(x) + "," + std::to_string(y) +
+                          " " + std::to_string(rw) + "x" + std::to_string(rh));
+        }
+
         return changed;
     }
     
@@ -689,11 +724,13 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
         } else if (type == "screen") {
             size_t p1 = payload.find('|');
             size_t p2 = payload.find('|', p1 + 1);
-            if (p1 == std::string::npos || p2 == std::string::npos) continue;
+            size_t p3 = payload.find('|', p2 + 1);
+            if (p1 == std::string::npos || p2 == std::string::npos || p3 == std::string::npos) continue;
 
             std::string session_id = payload.substr(0, p1);
             std::string dim = payload.substr(p1 + 1, p2 - p1 - 1);
-            std::string encoded = payload.substr(p2 + 1);
+            std::string rect = payload.substr(p2 + 1, p3 - p2 - 1);
+            std::string encoded = payload.substr(p3 + 1);
             Logger::debug("Processing screen packet for session " + session_id);
 
             int width = 0, height = 0;
@@ -702,31 +739,34 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                 continue;
             }
 
+            int x = 0, y = 0, rw = 0, rh = 0;
+            if (sscanf(rect.c_str(), "%d,%d,%d,%d", &x, &y, &rw, &rh) != 4 || rw <= 0 || rh <= 0) {
+                Logger::error("Invalid region for session " + session_id + ": " + rect);
+                continue;
+            }
+
             auto c = g_clientManager->getSession(session_id);
             if (!c) continue;
             c->client_socket = client_socket;
 
             auto decoded = ClientProtocolHandler::decodeFromClient(encoded);
-            auto screen_data = ClientProtocolHandler::decompressRLE(decoded);
-            // Validate frame length before updating the screen buffer
-            size_t expected_size = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
-            if (screen_data.size() != expected_size) {
-                Logger::error("Invalid frame size for session " + session_id +
+            auto region_data = ClientProtocolHandler::decompressRLE(decoded);
+            size_t expected_size = static_cast<size_t>(rw) * static_cast<size_t>(rh) * 3;
+            if (region_data.size() != expected_size) {
+                Logger::error("Invalid diff size for session " + session_id +
                               ": expected " + std::to_string(expected_size) +
-                              " bytes, got " + std::to_string(screen_data.size()));
-                // Update resolution so the GUI reflects the last known size
+                              " bytes, got " + std::to_string(region_data.size()));
                 c->updateScreen({}, width, height);
-                // Optionally notify the client to resend the frame
                 auto diag_payload = TunnelProtocol::createTunnelPayload("error", "invalid_frame");
                 WireGuardPacket diag_pkt(diag_payload);
                 auto diag_out = diag_pkt.serialize();
                 uint32_t diag_len = htonl(static_cast<uint32_t>(diag_out.size()));
                 sendAll(client_socket, reinterpret_cast<const char*>(&diag_len), sizeof(diag_len));
                 sendAll(client_socket, reinterpret_cast<const char*>(diag_out.data()), diag_out.size());
-                continue; // Discard corrupted frame
+                continue;
             }
 
-            bool changed = c->updateScreen(screen_data, width, height);
+            bool changed = c->applyScreenDiff(region_data, width, height, x, y, rw, rh);
             if (changed) {
                 if (c->viewer_window && IsWindow(c->viewer_window)) {
                     PostMessage(c->viewer_window, WM_NEW_SCREEN_DATA, 0, 0);
@@ -736,7 +776,9 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                 }
             }
             Logger::debug("Updated screen for session " + session_id +
-                          " (" + std::to_string(width) + "x" + std::to_string(height) + ")");
+                          " (" + std::to_string(width) + "x" + std::to_string(height) +
+                          ") region " + std::to_string(x) + "," + std::to_string(y) +
+                          " " + std::to_string(rw) + "x" + std::to_string(rh));
 
         } else if (type == "event") {
             size_t p = payload.find('|');

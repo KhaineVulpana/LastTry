@@ -517,26 +517,70 @@ public:
         }
         Logger::debug("Captured frame size: " + std::to_string(frameData.size()));
 
-        std::vector<BYTE> compressed = ChaChaCompressor::compressRLE(frameData);
+        int width = screen_capture.getWidth();
+        int height = screen_capture.getHeight();
+        const int bpp = 3;
+
+        bool sendFull = last_frame_data.size() != frameData.size();
+        int x = 0, y = 0, w = width, h = height;
+
+        if (!sendFull) {
+            int min_x = width, min_y = height, max_x = -1, max_y = -1;
+            for (int yy = 0; yy < height; ++yy) {
+                for (int xx = 0; xx < width; ++xx) {
+                    size_t idx = (static_cast<size_t>(yy) * width + xx) * bpp;
+                    if (frameData[idx] != last_frame_data[idx] ||
+                        frameData[idx + 1] != last_frame_data[idx + 1] ||
+                        frameData[idx + 2] != last_frame_data[idx + 2]) {
+                        if (xx < min_x) min_x = xx;
+                        if (yy < min_y) min_y = yy;
+                        if (xx > max_x) max_x = xx;
+                        if (yy > max_y) max_y = yy;
+                    }
+                }
+            }
+
+            if (max_x >= min_x && max_y >= min_y) {
+                x = min_x;
+                y = min_y;
+                w = max_x - min_x + 1;
+                h = max_y - min_y + 1;
+            } else {
+                return; // No changes
+            }
+        }
+
+        std::vector<BYTE> region;
+        region.reserve(static_cast<size_t>(w) * h * bpp);
+        for (int row = 0; row < h; ++row) {
+            size_t src = (static_cast<size_t>(y + row) * width + x) * bpp;
+            region.insert(region.end(),
+                          frameData.begin() + src,
+                          frameData.begin() + src + static_cast<size_t>(w) * bpp);
+        }
+
+        std::vector<BYTE> compressed = ChaChaCompressor::compressRLE(region);
         std::string encoded = WireGuardEncoder::encode(compressed);
 
-        Logger::debug("Sending frame " +
-                      std::to_string(screen_capture.getWidth()) + "x" +
-                      std::to_string(screen_capture.getHeight()) +
-                      ", compressed to " + std::to_string(compressed.size()) + " bytes");
+        Logger::debug("Sending frame region " + std::to_string(x) + "," +
+                      std::to_string(y) + " " + std::to_string(w) + "x" +
+                      std::to_string(h) + ", compressed to " +
+                      std::to_string(compressed.size()) + " bytes");
 
         std::stringstream payload;
         payload << session_id << "|";
-        payload << screen_capture.getWidth() << "x" << screen_capture.getHeight() << "|";
+        payload << width << "x" << height << "|";
+        payload << x << "," << y << "," << w << "," << h << "|";
         payload << encoded;
 
         std::vector<BYTE> tunnel_payload = TunnelProtocol::createTunnelPayload("screen", payload.str());
         WireGuardPacket packet(tunnel_payload);
 
-        if (!sendWireGuardPacket(packet)) {
+        if (sendWireGuardPacket(packet)) {
+            last_frame_data = frameData;
+        } else {
             Logger::debug("Failed to send frame packet");
         }
-        last_frame_data = frameData;
     }
 
     void sendMouseEvent(const std::string& evt) {
