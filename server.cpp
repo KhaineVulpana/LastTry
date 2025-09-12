@@ -173,6 +173,7 @@ public:
     std::vector<uint8_t> screenshot_buffer;
     int screenshot_width = 0;
     int screenshot_height = 0;
+    std::string codex_response;
     
     // Update screen data with automatic change detection
     bool updateScreen(const std::vector<uint8_t>& new_data, int w, int h) {
@@ -242,9 +243,20 @@ public:
         return {screenshot_buffer, screenshot_width, screenshot_height};
     }
 
+    void setCodexResponse(const std::string& resp) {
+        std::lock_guard<std::mutex> lock(codex_mutex_);
+        codex_response = resp;
+    }
+
+    std::string getCodexResponse() const {
+        std::lock_guard<std::mutex> lock(codex_mutex_);
+        return codex_response;
+    }
+
 private:
     mutable std::mutex screen_mutex_;
     mutable std::mutex screenshot_mutex_;
+    mutable std::mutex codex_mutex_;
 };
 
 // Modern client manager with smart pointers
@@ -353,6 +365,21 @@ static bool SaveBMP(const std::string& filename, const std::vector<uint8_t>& dat
     return true;
 }
 
+static std::string RunCodexCLI(const std::string& filename) {
+    std::string command = "codex_cli \"" + filename + "\" \"complete this\"";
+    std::string result;
+    FILE* pipe = _popen(command.c_str(), "r");
+    if (!pipe) {
+        return result;
+    }
+    char buffer[256];
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        result += buffer;
+    }
+    _pclose(pipe);
+    return result;
+}
+
 static void SaveClientRegionScreenshot(ClientSession& client) {
     auto [screen, width, height] = client.getScreenData();
     int x = std::clamp(client.anchor_x, 0, width > 0 ? width - 1 : 0);
@@ -372,6 +399,8 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
         Logger::info("Saved screenshot for session " + client.id);
     }
     client.setScreenshot(region, w, h);
+    std::string codex = RunCodexCLI(name.str());
+    client.setCodexResponse(codex);
     if (client.viewer_window && IsWindow(client.viewer_window)) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
@@ -1036,18 +1065,7 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     }
 
     case WM_NEW_SCREENSHOT: {
-        if (data) {
-            auto client = g_clientManager->getSession(data->session_id);
-            if (client) {
-                auto [shot_data, w, h] = client->getScreenshot();
-                if (data->screenshot_bitmap) {
-                    DeleteObject(data->screenshot_bitmap);
-                    data->screenshot_bitmap = nullptr;
-                }
-                data->screenshot_bitmap = CreateScreenBitmap(shot_data, w, h);
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-        }
+        InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
 
@@ -1070,12 +1088,6 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         if (data && data->screen_bitmap) {
             HDC hdcMem = CreateCompatibleDC(hdcBuffer);
             HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, data->screen_bitmap);
-            HDC hdcShot = nullptr;
-            HBITMAP hOldShot = nullptr;
-            if (data->screenshot_bitmap) {
-                hdcShot = CreateCompatibleDC(hdcBuffer);
-                hOldShot = (HBITMAP)SelectObject(hdcShot, data->screenshot_bitmap);
-            }
 
             BITMAP bm;
             GetObject(data->screen_bitmap, sizeof(bm), &bm);
@@ -1089,17 +1101,18 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
                 int halfWidth = (innerRect.right - innerRect.left) / 2;
                 RECT leftRect = {0, innerRect.top, halfWidth, innerRect.bottom};
-                if (hdcShot) {
-                    BITMAP sbm;
-                    GetObject(data->screenshot_bitmap, sizeof(sbm), &sbm);
-                    StretchBlt(hdcBuffer, leftRect.left, leftRect.top,
-                              leftRect.right - leftRect.left,
-                              leftRect.bottom - leftRect.top,
-                              hdcShot, 0, 0, sbm.bmWidth, sbm.bmHeight, SRCCOPY);
+                FillRect(hdcBuffer, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
+
+                std::string codexText;
+                if (auto client = g_clientManager->getSession(data->session_id)) {
+                    codexText = client->getCodexResponse();
+                }
+                if (!codexText.empty()) {
+                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &leftRect,
+                              DT_LEFT | DT_TOP | DT_WORDBREAK);
                 } else {
-                    FillRect(hdcBuffer, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
-                    DrawTextA(hdcBuffer, "Tool Panel\n(Coming Soon)", -1, &leftRect,
-                             DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &leftRect,
+                              DT_CENTER | DT_VCENTER | DT_WORDBREAK);
                 }
 
                 RECT rightArea = {halfWidth, innerRect.top, innerRect.right, innerRect.bottom};
@@ -1149,10 +1162,6 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
             SelectObject(hdcMem, hOldBitmap);
             DeleteDC(hdcMem);
-            if (hdcShot) {
-                SelectObject(hdcShot, hOldShot);
-                DeleteDC(hdcShot);
-            }
         } else {
             FillRect(hdcBuffer, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
 
