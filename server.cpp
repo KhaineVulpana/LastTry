@@ -24,7 +24,6 @@
 #include <mutex>
 #include <memory>
 #include <functional>
-#include <optional>
 #include <fstream>
 #include <iomanip>
 #include <random>
@@ -33,6 +32,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <climits>
+#include <cstdio>
 
 // Modern JSON library (nlohmann/json - header-only)
 #include "nlohmann/json.hpp"
@@ -43,7 +43,6 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <windowsx.h>
-#include <queue>
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "comctl32.lib")
@@ -51,6 +50,8 @@
 
 using json = nlohmann::json;
 using namespace std::chrono_literals;
+
+struct ViewerWindowData;
 
 // Window class names
 #define WC_MAIN_WINDOW L"VPNTunnelServer"
@@ -160,28 +161,10 @@ public:
     bool active = false;
     int width = 0, height = 0;
     std::vector<uint8_t> screen_buffer;
-    std::queue<std::string> pending_inputs;
     HWND viewer_window = nullptr;
     bool is_connected = false;
-    
-    // Thread-safe input queueing
-    void queueInput(const std::string& command) {
-        std::lock_guard<std::mutex> lock(input_mutex_);
-        pending_inputs.push(command);
-        Logger::debug("Queued input for " + id + ": " + command);
-    }
-    
-    // Thread-safe input retrieval
-    std::optional<std::string> getNextInput() {
-        std::lock_guard<std::mutex> lock(input_mutex_);
-        if (pending_inputs.empty()) {
-            return std::nullopt;
-        }
-        
-        std::string command = pending_inputs.front();
-        pending_inputs.pop();
-        return command;
-    }
+    int anchor_x = 0;
+    int anchor_y = 0;
     
     // Update screen data with automatic change detection
     bool updateScreen(const std::vector<uint8_t>& new_data, int w, int h) {
@@ -206,7 +189,6 @@ public:
     }
     
 private:
-    mutable std::mutex input_mutex_;
     mutable std::mutex screen_mutex_;
 };
 
@@ -281,6 +263,62 @@ private:
         return result;
     }
 };
+
+static bool SaveBMP(const std::string& filename, const std::vector<uint8_t>& data, int width, int height) {
+    BITMAPFILEHEADER bfh{};
+    BITMAPINFOHEADER bih{};
+    int rowSize = width * 3;
+    int padding = (4 - (rowSize % 4)) % 4;
+    int dataSize = (rowSize + padding) * height;
+
+    bfh.bfType = 0x4D42;
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    bfh.bfSize = bfh.bfOffBits + dataSize;
+
+    bih.biSize = sizeof(BITMAPINFOHEADER);
+    bih.biWidth = width;
+    bih.biHeight = -height;
+    bih.biPlanes = 1;
+    bih.biBitCount = 24;
+    bih.biCompression = BI_RGB;
+    bih.biSizeImage = dataSize;
+
+    std::ofstream file(filename, std::ios::binary);
+    if (!file) return false;
+    file.write(reinterpret_cast<const char*>(&bfh), sizeof(bfh));
+    file.write(reinterpret_cast<const char*>(&bih), sizeof(bih));
+
+    for (int y = 0; y < height; ++y) {
+        file.write(reinterpret_cast<const char*>(data.data() + y * width * 3), rowSize);
+        if (padding) {
+            uint8_t pad[3] = {0,0,0};
+            file.write(reinterpret_cast<const char*>(pad), padding);
+        }
+    }
+    return true;
+}
+
+static void SaveClientRegionScreenshot(ClientSession& client) {
+    auto [screen, width, height] = client.getScreenData();
+    int x = std::clamp(client.anchor_x, 0, width > 0 ? width - 1 : 0);
+    int y = std::clamp(client.anchor_y, 0, height > 0 ? height - 1 : 0);
+    if (width == 0 || height == 0 || x >= width || y >= height) return;
+    int w = width - x;
+    int h = height - y;
+    std::vector<uint8_t> region(w * h * 3);
+    for (int row = 0; row < h; ++row) {
+        memcpy(region.data() + row * w * 3,
+               screen.data() + ((y + row) * width + x) * 3,
+               w * 3);
+    }
+    std::ostringstream name;
+    name << "screenshot_" << client.id << ".bmp";
+    if (SaveBMP(name.str(), region, w, h)) {
+        Logger::info("Saved screenshot for session " + client.id);
+    }
+}
+
+static void ToggleSplitScreen(ClientSession& client);
 
 struct WireGuardHeader {
     BYTE type;
@@ -676,20 +714,25 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             Logger::debug("Updated screen for session " + session_id +
                           " (" + std::to_string(width) + "x" + std::to_string(height) + ")");
 
-            auto input_command = c->getNextInput();
-            if (input_command) {
-                std::string encoded_cmd = ClientProtocolHandler::encodeForClient(*input_command);
-                auto tp = TunnelProtocol::createTunnelPayload("input", encoded_cmd);
-                WireGuardPacket pkt(tp);
-                auto out = pkt.serialize();
-                uint32_t out_len = htonl(static_cast<uint32_t>(out.size()));
-                if (!sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len))) {
-                    Logger::debug("Failed to send input length to session " + session_id);
-                } else if (!sendAll(client_socket, reinterpret_cast<const char*>(out.data()), out.size())) {
-                    Logger::debug("Failed to send input payload to session " + session_id);
-                } else {
-                    Logger::debug("Sent input command to session " + session_id + ": " + *input_command);
+        } else if (type == "event") {
+            size_t p = payload.find('|');
+            if (p == std::string::npos) continue;
+            std::string session_id = payload.substr(0, p);
+            std::string evt = payload.substr(p + 1);
+            auto c = g_clientManager->getSession(session_id);
+            if (!c) continue;
+            if (evt.rfind("middle:", 0) == 0) {
+                int x = 0, y = 0;
+                if (sscanf(evt.c_str() + 7, "%d,%d", &x, &y) == 2) {
+                    c->anchor_x = x;
+                    c->anchor_y = y;
+                    Logger::info("Anchor updated for session " + session_id +
+                                 ": " + std::to_string(x) + "," + std::to_string(y));
                 }
+            } else if (evt == "right") {
+                SaveClientRegionScreenshot(*c);
+            } else if (evt == "long_middle") {
+                ToggleSplitScreen(*c);
             }
         } else {
             Logger::debug("Unknown packet type from " + std::string(ip) + ": " + type);
@@ -719,6 +762,19 @@ struct ViewerWindowData {
     int remote_height;
     RECT draw_rect; // area where remote screen is rendered
 };
+
+static void ToggleSplitScreen(ClientSession& client) {
+    if (client.viewer_window && IsWindow(client.viewer_window)) {
+        ViewerWindowData* data = (ViewerWindowData*)GetWindowLongPtr(client.viewer_window, GWLP_USERDATA);
+        if (data) {
+            data->split_mode = !data->split_mode;
+            if (!data->split_mode) {
+                ShowWindow(client.viewer_window, SW_MAXIMIZE);
+            }
+            InvalidateRect(client.viewer_window, nullptr, TRUE);
+        }
+    }
+}
 
 // Modern GUI helper functions
 void UpdateClientList() {
@@ -984,72 +1040,14 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         return 0;
     }
     
-    case WM_LBUTTONDOWN: {
-        if (data && data->screen_bitmap) {
-            auto client = g_clientManager->getSession(data->session_id);
-            if (!client) return 0;
-            
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
-
-            RECT active = data->draw_rect;
-            if (x < active.left || x >= active.right ||
-                y < active.top || y >= active.bottom) {
-                return 0; // Outside active remote area
-            }
-
-            x = (x - active.left) * data->remote_width / (active.right - active.left);
-            y = (y - active.top) * data->remote_height / (active.bottom - active.top);
-
-            std::string command = "click:" + std::to_string(x) + ":" + std::to_string(y);
-            client->queueInput(command);
-        }
+    case WM_LBUTTONDOWN:
         return 0;
-    }
-    
-    case WM_RBUTTONDOWN: {
-        if (data && data->screen_bitmap) {
-            auto client = g_clientManager->getSession(data->session_id);
-            if (!client) return 0;
-            
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
 
-            RECT active = data->draw_rect;
-            if (x < active.left || x >= active.right ||
-                y < active.top || y >= active.bottom) {
-                return 0;
-            }
-
-            x = (x - active.left) * data->remote_width / (active.right - active.left);
-            y = (y - active.top) * data->remote_height / (active.bottom - active.top);
-
-            std::string command = "rightclick:" + std::to_string(x) + ":" + std::to_string(y);
-            client->queueInput(command);
-        }
+    case WM_RBUTTONDOWN:
         return 0;
-    }
-    
-    case WM_CHAR: {
-        if (data) {
-            auto client = g_clientManager->getSession(data->session_id);
-            if (!client) return 0;
-            
-            std::string command;
-            if (wParam == VK_RETURN) {
-                command = "key:ENTER";
-            } else if (wParam == VK_ESCAPE) {
-                command = "key:ESCAPE";
-            } else if (wParam >= 32 && wParam < 127) {
-                command = "key:" + std::string(1, (char)wParam);
-            } else {
-                return 0;
-            }
-            
-            client->queueInput(command);
-        }
+
+    case WM_CHAR:
         return 0;
-    }
     
     case WM_CLOSE: {
         if (data) {
