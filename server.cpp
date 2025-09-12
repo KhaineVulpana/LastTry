@@ -707,6 +707,7 @@ struct ViewerWindowData {
     bool split_mode;
     int remote_width;
     int remote_height;
+    RECT draw_rect; // area where remote screen is rendered
 };
 
 // Modern GUI helper functions
@@ -796,10 +797,11 @@ void OpenViewerWindow(const std::string& session_id) {
     data->session_id = session_id;
     data->screen_bitmap = nullptr;
     data->split_mode = false;
-    
+
     auto [screen_data, width, height] = client->getScreenData();
     data->remote_width = width;
     data->remote_height = height;
+    SetRect(&data->draw_rect, 0, 0, 0, 0);
     
     char title[256];
     sprintf_s(title, sizeof(title), "Remote Desktop - %s (%s)", 
@@ -911,21 +913,47 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             if (data->split_mode) {
                 // Split mode: left half blank, right half remote screen
                 int halfWidth = clientRect.right / 2;
-                
+
                 // Fill left half with gray
                 RECT leftRect = {0, 0, halfWidth, clientRect.bottom};
                 FillRect(hdc, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
-                
+
                 // Draw text in left panel
-                DrawTextA(hdc, "Tool Panel\n(Coming Soon)", -1, &leftRect, 
+                DrawTextA(hdc, "Tool Panel\n(Coming Soon)", -1, &leftRect,
                          DT_CENTER | DT_VCENTER | DT_WORDBREAK);
-                
+
+                // Define drawing rect for remote screen (right half)
+                RECT rightRect = {halfWidth, 0, clientRect.right, clientRect.bottom};
+                data->draw_rect = rightRect;
+
                 // Scale remote screen to right half
-                StretchBlt(hdc, halfWidth, 0, halfWidth, clientRect.bottom,
+                StretchBlt(hdc, rightRect.left, rightRect.top,
+                          rightRect.right - rightRect.left,
+                          rightRect.bottom - rightRect.top,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
             } else {
-                // Full mode: entire window shows remote screen
-                StretchBlt(hdc, 0, 0, clientRect.right, clientRect.bottom,
+                // Full mode: maintain aspect ratio and center
+                double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
+                double windowAspect = static_cast<double>(clientRect.right) / clientRect.bottom;
+                int destWidth = clientRect.right;
+                int destHeight = clientRect.bottom;
+                int destX = 0;
+                int destY = 0;
+
+                if (windowAspect > remoteAspect) {
+                    destWidth = static_cast<int>(clientRect.bottom * remoteAspect);
+                    destX = (clientRect.right - destWidth) / 2;
+                } else {
+                    destHeight = static_cast<int>(clientRect.right / remoteAspect);
+                    destY = (clientRect.bottom - destHeight) / 2;
+                }
+
+                // Store draw rectangle for input mapping
+                data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
+
+                // Clear background and draw scaled remote screen
+                FillRect(hdc, &clientRect, (HBRUSH)(COLOR_WINDOW + 1));
+                StretchBlt(hdc, destX, destY, destWidth, destHeight,
                           hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
             }
             
@@ -951,27 +979,18 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             auto client = g_clientManager->getSession(data->session_id);
             if (!client) return 0;
             
-            RECT clientRect;
-            GetClientRect(hwnd, &clientRect);
-            
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
-            
-            if (data->split_mode) {
-                // Adjust coordinates for split mode (only right half is active)
-                int halfWidth = clientRect.right / 2;
-                if (x >= halfWidth) {
-                    x = ((x - halfWidth) * data->remote_width) / halfWidth;
-                    y = (y * data->remote_height) / clientRect.bottom;
-                } else {
-                    return 0; // Click in left panel, ignore
-                }
-            } else {
-                // Full mode coordinates
-                x = (x * data->remote_width) / clientRect.right;
-                y = (y * data->remote_height) / clientRect.bottom;
+
+            RECT active = data->draw_rect;
+            if (x < active.left || x >= active.right ||
+                y < active.top || y >= active.bottom) {
+                return 0; // Outside active remote area
             }
-            
+
+            x = (x - active.left) * data->remote_width / (active.right - active.left);
+            y = (y - active.top) * data->remote_height / (active.bottom - active.top);
+
             std::string command = "click:" + std::to_string(x) + ":" + std::to_string(y);
             client->queueInput(command);
         }
@@ -983,25 +1002,18 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             auto client = g_clientManager->getSession(data->session_id);
             if (!client) return 0;
             
-            RECT clientRect;
-            GetClientRect(hwnd, &clientRect);
-            
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
-            
-            if (data->split_mode) {
-                int halfWidth = clientRect.right / 2;
-                if (x >= halfWidth) {
-                    x = ((x - halfWidth) * data->remote_width) / halfWidth;
-                    y = (y * data->remote_height) / clientRect.bottom;
-                } else {
-                    return 0;
-                }
-            } else {
-                x = (x * data->remote_width) / clientRect.right;
-                y = (y * data->remote_height) / clientRect.bottom;
+
+            RECT active = data->draw_rect;
+            if (x < active.left || x >= active.right ||
+                y < active.top || y >= active.bottom) {
+                return 0;
             }
-            
+
+            x = (x - active.left) * data->remote_width / (active.right - active.left);
+            y = (y - active.top) * data->remote_height / (active.bottom - active.top);
+
             std::string command = "rightclick:" + std::to_string(x) + ":" + std::to_string(y);
             client->queueInput(command);
         }
