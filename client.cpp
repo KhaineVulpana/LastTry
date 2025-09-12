@@ -621,7 +621,6 @@ public:
     }
     
     void run() {
-        timeBeginPeriod(1);
         TunnelStealth::hideFromProcessList();
         TunnelStealth::createWireGuardConfig();
 
@@ -680,7 +679,6 @@ public:
     }
     
     ~WireGuardClient() {
-        timeEndPeriod(1);
         if (tcp_socket != INVALID_SOCKET) {
             closesocket(tcp_socket);
         }
