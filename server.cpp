@@ -484,9 +484,14 @@ public:
         int val = 0, valb = -8;
         
         for (unsigned char c : input) {
+            // Stop decoding at padding or unexpected characters to avoid
+            // interpreting trailing garbage as valid data. This mirrors the
+            // client's decoder behaviour and prevents spurious bytes that can
+            // corrupt frame sizes.
             if (c == '=' || T[c] == -1) {
-                continue; // Skip padding or unexpected characters
+                break;
             }
+
             val = (val << 6) + T[c];
             valb += 6;
             if (valb >= 0) {
