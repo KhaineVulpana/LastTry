@@ -173,6 +173,7 @@ public:
     std::vector<uint8_t> screenshot_buffer;
     int screenshot_width = 0;
     int screenshot_height = 0;
+    std::string screenshot_log_file;
     std::string codex_response;
     
     // Update screen data with automatic change detection
@@ -271,7 +272,13 @@ public:
         client->client_ip = client_ip;
         client->last_seen = std::chrono::system_clock::now();
         client->active = true;
-        
+
+        std::ostringstream logname;
+        logname << "screenshots_" << session_id << ".txt";
+        client->screenshot_log_file = logname.str();
+        std::ofstream log_file(client->screenshot_log_file);
+        log_file << "[]";
+
         std::lock_guard<std::mutex> lock(clients_mutex_);
         clients_[session_id] = client;
         
@@ -365,6 +372,28 @@ static bool SaveBMP(const std::string& filename, const std::vector<uint8_t>& dat
     return true;
 }
 
+static std::string Base64Encode(const std::vector<uint8_t>& data) {
+    static const char encode_chars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    int val = 0, valb = -6;
+    for (uint8_t c : data) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out.push_back(encode_chars[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6) {
+        out.push_back(encode_chars[((val << 8) >> (valb + 8)) & 0x3F]);
+    }
+    while (out.size() % 4) {
+        out.push_back('=');
+    }
+    return out;
+}
+
 static std::string RunCodexCLI(const std::string& filename) {
     std::string command = "codex_cli \"" + filename + "\" \"complete this\"";
     std::string result;
@@ -396,11 +425,30 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     std::ostringstream name;
     name << "screenshot_" << client.id << ".bmp";
     if (SaveBMP(name.str(), region, w, h)) {
-        Logger::info("Saved screenshot for session " + client.id);
+        Logger::info("Captured screenshot for session " + client.id);
     }
+
+    std::string b64 = Base64Encode(region);
+    json arr;
+    std::ifstream in(client.screenshot_log_file);
+    if (in.is_open()) {
+        try {
+            in >> arr;
+        } catch (...) {
+            arr = json::array();
+        }
+    } else {
+        arr = json::array();
+    }
+    in.close();
+    arr.push_back(b64);
+    std::ofstream out(client.screenshot_log_file);
+    out << arr.dump(2);
+
     client.setScreenshot(region, w, h);
     std::string codex = RunCodexCLI(name.str());
     client.setCodexResponse(codex);
+    std::remove(name.str().c_str());
     if (client.viewer_window && IsWindow(client.viewer_window)) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
