@@ -602,7 +602,8 @@ public:
                         sendDesktopFrame();
                         detectAndSendMouseEvents();
                         
-                        std::uniform_int_distribution<> dis(16, 33);
+                        // Reduce delay to increase screen update rate
+                        std::uniform_int_distribution<> dis(8, 16);
                         std::this_thread::sleep_for(std::chrono::milliseconds(dis(gen)));
                         
                         static int health_check = 0;
