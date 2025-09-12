@@ -418,7 +418,9 @@ public:
         int val = 0, valb = -8;
         
         for (unsigned char c : input) {
-            if (T[c] == -1) break;
+            if (c == '=' || T[c] == -1) {
+                continue; // Skip padding or unexpected characters
+            }
             val = (val << 6) + T[c];
             valb += 6;
             if (valb >= 0) {
@@ -435,13 +437,19 @@ public:
         std::vector<uint8_t> result;
         
         for (size_t i = 0; i < compressed.size(); ) {
-            if (i + 2 < compressed.size() && compressed[i] == 0xFF) {
-                uint8_t count = compressed[i + 1];
-                uint8_t value = compressed[i + 2];
-                for (int j = 0; j < count; j++) {
-                    result.push_back(value);
+            if (compressed[i] == 0xFF) {
+                if (i + 2 < compressed.size() && compressed[i + 1] != 0) {
+                    uint8_t count = compressed[i + 1];
+                    uint8_t value = compressed[i + 2];
+                    for (int j = 0; j < count; j++) {
+                        result.push_back(value);
+                    }
+                    i += 3;
+                } else {
+                    // Treat missing or zero-count run as literal 0xFF
+                    result.push_back(0xFF);
+                    i++;
                 }
-                i += 3;
             } else {
                 result.push_back(compressed[i]);
                 i++;
@@ -590,7 +598,10 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             std::string encoded = payload.substr(p2 + 1);
 
             int width = 0, height = 0;
-            sscanf(dim.c_str(), "%dx%d", &width, &height);
+            if (sscanf(dim.c_str(), "%dx%d", &width, &height) != 2 || width <= 0 || height <= 0) {
+                Logger::error("Invalid frame dimensions for session " + session_id + ": " + dim);
+                continue;
+            }
 
             auto c = g_clientManager->getSession(session_id);
             if (!c) continue;
@@ -604,6 +615,8 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                 Logger::error("Invalid frame size for session " + session_id +
                               ": expected " + std::to_string(expected_size) +
                               " bytes, got " + std::to_string(screen_data.size()));
+                // Update resolution so the GUI reflects the last known size
+                c->updateScreen({}, width, height);
                 // Optionally notify the client to resend the frame
                 auto diag_payload = TunnelProtocol::createTunnelPayload("error", "invalid_frame");
                 WireGuardPacket diag_pkt(diag_payload);
