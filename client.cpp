@@ -54,29 +54,27 @@ LRESULT CALLBACK IpPromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 static std::string PromptForServerIP(const std::string& default_ip) {
     std::string ip = default_ip;
-
-    WNDCLASS wc{};
+    WNDCLASSA wc{};
     wc.lpfnWndProc = IpPromptWndProc;
     wc.hInstance = GetModuleHandle(nullptr);
-    wc.lpszClassName = L"IpPrompt";
-    RegisterClass(&wc);
+    wc.lpszClassName = "IpPrompt";
+    RegisterClassA(&wc);
 
     IpPromptData data{&ip};
-    HWND hwnd = CreateWindowEx(WS_EX_DLGMODALFRAME, wc.lpszClassName, L"Server IP",
-                               WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
-                               300, 120, nullptr, nullptr, wc.hInstance, &data);
+    HWND hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, wc.lpszClassName, "Server IP",
+                                WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
+                                300, 120, nullptr, nullptr, wc.hInstance, &data)
     if (!hwnd) {
         return ip;
     }
 
-    CreateWindowEx(0, L"STATIC", L"Server IP:", WS_CHILD | WS_VISIBLE, 10, 10, 80, 20,
-                   hwnd, nullptr, wc.hInstance, nullptr);
-    HWND hEdit = CreateWindowEx(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                90, 10, 180, 20, hwnd, (HMENU)1, wc.hInstance, nullptr);
+    CreateWindowExA(0, "STATIC", "Server IP:", WS_CHILD | WS_VISIBLE, 10, 10, 80, 20,
+                    hwnd, nullptr, wc.hInstance, nullptr);
+    HWND hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                 90, 10, 180, 20, hwnd, (HMENU)1, wc.hInstance, nullptr);
     SetWindowTextA(hEdit, default_ip.c_str());
-    CreateWindowEx(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                   110, 40, 80, 25, hwnd, (HMENU)IDOK, wc.hInstance, nullptr);
-
+    CreateWindowExA(0, "BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                    110, 40, 80, 25, hwnd, (HMENU)IDOK, wc.hInstance, nullptr);
     ShowWindow(hwnd, SW_SHOW);
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
