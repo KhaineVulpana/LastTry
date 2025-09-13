@@ -24,6 +24,69 @@
 // Allow larger screen capture packets (up to 50MB) to prevent premature disconnects
 static constexpr uint32_t MAX_PACKET_SIZE = 50 * 1024 * 1024;
 
+struct IpPromptData {
+    std::string* ip;
+};
+
+LRESULT CALLBACK IpPromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static IpPromptData* data = nullptr;
+    switch (msg) {
+    case WM_CREATE:
+        data = reinterpret_cast<IpPromptData*>(reinterpret_cast<LPCREATESTRUCT>(lParam)->lpCreateParams);
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            char buf[256] = {0};
+            GetWindowTextA(GetDlgItem(hwnd, 1), buf, sizeof(buf));
+            if (data && data->ip && buf[0] != '\0') {
+                *(data->ip) = buf;
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+static std::string PromptForServerIP(const std::string& default_ip) {
+    std::string ip = default_ip;
+
+    WNDCLASSA wc{};
+    wc.lpfnWndProc = IpPromptWndProc;
+    wc.hInstance = GetModuleHandle(nullptr);
+    wc.lpszClassName = "IpPrompt";
+    RegisterClassA(&wc);
+
+    IpPromptData data{&ip};
+    HWND hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, wc.lpszClassName, "Server IP",
+                                WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
+                                300, 120, nullptr, nullptr, wc.hInstance, &data);
+    if (!hwnd) {
+        return ip;
+    }
+
+    CreateWindowExA(0, "STATIC", "Server IP:", WS_CHILD | WS_VISIBLE, 10, 10, 80, 20,
+                    hwnd, nullptr, wc.hInstance, nullptr);
+    HWND hEdit = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                 90, 10, 180, 20, hwnd, (HMENU)1, wc.hInstance, nullptr);
+    SetWindowTextA(hEdit, default_ip.c_str());
+    CreateWindowExA(0, "BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                    110, 40, 80, 25, hwnd, (HMENU)IDOK, wc.hInstance, nullptr);
+
+    ShowWindow(hwnd, SW_SHOW);
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    return ip;
+}
+
 class Logger {
 public:
     enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
@@ -685,11 +748,13 @@ public:
 int main(int argc, char* argv[]) {
     std::string host = "192.168.88.100";
     int port = 443;
-    
+
     if (argc == 3) {
         host = argv[1];
         port = std::stoi(argv[2]);
-    } else if (argc != 1) {
+    } else if (argc == 1) {
+        host = PromptForServerIP(host);
+    } else {
         return 1;
     }
     
