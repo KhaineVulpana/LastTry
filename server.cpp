@@ -111,14 +111,11 @@ class Logger {
 public:
     // Avoid name clashes with Windows headers by prefixing log levels
     enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
-    
+
     static void log(Level level, const std::string& message) {
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        
-        std::lock_guard<std::mutex> lock(log_mutex_);
-        std::cout << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "] "
-                  << level_strings_[level] << ": " << message << std::endl;
+        (void)level;
+        (void)message;
+        // Logging disabled per user request.
     }
     
     static void info(const std::string& msg) { log(LOG_INFO, msg); }
@@ -399,7 +396,7 @@ static std::string Base64Encode(const std::vector<uint8_t>& data) {
 }
 
 static std::string RunCodexCLI(const std::string& filename) {
-    std::string command = "codex_cli \"" + filename + "\" \"complete this\"";
+    std::string command = "codex \"" + filename + "\" \"complete this\"";
     std::string result;
     FILE* pipe = _popen(command.c_str(), "r");
     if (!pipe) {
@@ -426,9 +423,20 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
                screen.data() + ((y + row) * width + x) * 3,
                w * 3);
     }
-    std::ostringstream name;
-    name << "screenshot_" << client.id << ".bmp";
-    if (SaveBMP(name.str(), region, w, h)) {
+    auto now = std::chrono::system_clock::now();
+    auto t = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_info{};
+    localtime_s(&tm_info, &t);
+
+    char dateDir[16];
+    strftime(dateDir, sizeof(dateDir), "%Y-%m-%d", &tm_info);
+    CreateDirectoryA(dateDir, nullptr);
+
+    char timeName[32];
+    strftime(timeName, sizeof(timeName), "%H-%M-%S", &tm_info);
+    std::string filepath = std::string(dateDir) + "\\" + timeName + ".bmp";
+
+    if (SaveBMP(filepath, region, w, h)) {
         Logger::info("Captured screenshot for session " + client.id);
     }
 
@@ -450,9 +458,8 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     out << arr.dump(2);
 
     client.setScreenshot(region, w, h);
-    std::string codex = RunCodexCLI(name.str());
+    std::string codex = RunCodexCLI(filepath);
     client.setCodexResponse(codex);
-    std::remove(name.str().c_str());
     if (client.viewer_window && IsWindow(client.viewer_window)) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
@@ -1495,22 +1502,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_vpnServer = std::make_unique<VPNTunnelServer>(g_config.port);
         g_vpnServer->start();
         
-        // DOUBLE-CLICK MODE: Show startup notification
-        if (strlen(lpCmdLine) == 0) {
-            char startupMsg[512];
-            sprintf_s(startupMsg, sizeof(startupMsg), 
-                     "VPN Tunnel Server started successfully!\n\n"
-                     "Listening on port: %d (VPN Management Port)\n"
-                     "Ready to accept client connections.\n\n"
-                     "Instructions:\n"
-                     "• Clients will appear in the list below\n"
-                     "• Double-click any client to view their desktop\n"
-                     "• Use the ⚏ button to toggle split-screen mode",
-                     g_config.port);
-            
-            MessageBoxA(g_hMainWnd, startupMsg, "VPN Server Ready", MB_OK | MB_ICONINFORMATION);
-        }
-        
         Logger::info("VPN Tunnel Server GUI started successfully on port " + std::to_string(g_config.port));
         
         // Message loop
@@ -1528,7 +1519,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         
     } catch (const std::exception& e) {
         Logger::error("Fatal error: " + std::string(e.what()));
-        MessageBoxA(nullptr, e.what(), "VPN Tunnel Server Error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }
