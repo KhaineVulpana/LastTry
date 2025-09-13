@@ -29,12 +29,9 @@ public:
     enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
 
     static void log(Level level, const std::string& message) {
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-
-        std::lock_guard<std::mutex> lock(log_mutex_);
-        std::cout << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "] "
-                  << level_strings_[level] << ": " << message << std::endl;
+        (void)level;
+        (void)message;
+        // Logging disabled per user request.
     }
 
     static void debug(const std::string& msg) { log(LOG_DEBUG, msg); }
