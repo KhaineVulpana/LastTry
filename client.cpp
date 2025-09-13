@@ -54,7 +54,6 @@ LRESULT CALLBACK IpPromptWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
 
 static std::string PromptForServerIP(const std::string& default_ip) {
     std::string ip = default_ip;
-
     WNDCLASSA wc{};
     wc.lpfnWndProc = IpPromptWndProc;
     wc.hInstance = GetModuleHandle(nullptr);
@@ -64,7 +63,7 @@ static std::string PromptForServerIP(const std::string& default_ip) {
     IpPromptData data{&ip};
     HWND hwnd = CreateWindowExA(WS_EX_DLGMODALFRAME, wc.lpszClassName, "Server IP",
                                 WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, CW_USEDEFAULT,
-                                300, 120, nullptr, nullptr, wc.hInstance, &data);
+                                300, 120, nullptr, nullptr, wc.hInstance, &data)
     if (!hwnd) {
         return ip;
     }
@@ -76,7 +75,6 @@ static std::string PromptForServerIP(const std::string& default_ip) {
     SetWindowTextA(hEdit, default_ip.c_str());
     CreateWindowExA(0, "BUTTON", "OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                     110, 40, 80, 25, hwnd, (HMENU)IDOK, wc.hInstance, nullptr);
-
     ShowWindow(hwnd, SW_SHOW);
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
