@@ -105,9 +105,12 @@ public:
     enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
     
     static void log(Level level, const std::string& message) {
-        (void)level;
-        (void)message;
-        // Logging disabled per user request.
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        std::cout << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "] "
+                  << level_strings_[level] << ": " << message << std::endl;
     }
     
     static void info(const std::string& msg) { log(LOG_INFO, msg); }
@@ -388,64 +391,18 @@ static std::string Base64Encode(const std::vector<uint8_t>& data) {
 }
 
 static std::string RunCodexCLI(const std::string& filename) {
-    // Use image input flag and a clear prompt
-    std::string command = std::string("codex -i \"") + filename + "\" \"Explain this error\"";
-
+    std::string command = "codex_cli \"" + filename + "\" \"complete this\"";
     std::string result;
     FILE* pipe = _popen(command.c_str(), "r");
     if (!pipe) {
-        Logger::error("Failed to launch Codex CLI. Command: " + command +
-                      ". Ensure the binary is installed and in PATH, or set CODEX_CLI.");
-        return std::string("Error: Could not start Codex CLI (") + cli + ")";
+        return result;
     }
-
     char buffer[256];
     while (fgets(buffer, sizeof(buffer), pipe)) {
         result += buffer;
     }
     _pclose(pipe);
-
-    if (result.empty()) {
-        Logger::warn("Codex CLI returned no output. Command: " + command);
-    }
     return result;
-}
-
-// Build a BMP file as bytes in memory from raw RGB data (top-down)
-static std::vector<uint8_t> BuildBMPBytes(const std::vector<uint8_t>& data, int width, int height) {
-    BITMAPFILEHEADER bfh{};
-    BITMAPINFOHEADER bih{};
-    int rowSize = width * 3;
-    int padding = (4 - (rowSize % 4)) % 4;
-    int dataSize = (rowSize + padding) * height;
-
-    bfh.bfType = 0x4D42;
-    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    bfh.bfSize = bfh.bfOffBits + dataSize;
-
-    bih.biSize = sizeof(BITMAPINFOHEADER);
-    bih.biWidth = width;
-    bih.biHeight = -height; // top-down
-    bih.biPlanes = 1;
-    bih.biBitCount = 24;
-    bih.biCompression = BI_RGB;
-    bih.biSizeImage = dataSize;
-
-    std::vector<uint8_t> out;
-    out.reserve(sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + dataSize);
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&bfh), reinterpret_cast<uint8_t*>(&bfh) + sizeof(bfh));
-    out.insert(out.end(), reinterpret_cast<uint8_t*>(&bih), reinterpret_cast<uint8_t*>(&bih) + sizeof(bih));
-
-    int rowStride = rowSize + padding;
-    out.resize(out.size() + static_cast<size_t>(rowStride) * height, 0);
-    uint8_t* dst = out.data() + sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    for (int y = 0; y < height; ++y) {
-        memcpy(dst + static_cast<size_t>(y) * rowStride,
-               data.data() + static_cast<size_t>(y) * width * 3,
-               static_cast<size_t>(rowSize));
-        // padding already zeroed by resize
-    }
-    return out;
 }
 
 static void SaveClientRegionScreenshot(ClientSession& client) {
@@ -461,30 +418,13 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
                screen.data() + ((y + row) * width + x) * 3,
                w * 3);
     }
-    // Ensure screenshots folder exists
-#if defined(_WIN32)
-    CreateDirectoryA("screenshots", nullptr);
-#endif
-
-    // Build timestamped filename (YYYYMMDD_HHMMSS_mmm)
-    auto now_tp = std::chrono::system_clock::now();
-    std::time_t now = std::chrono::system_clock::to_time_t(now_tp);
-    std::tm tm{};
-#if defined(_WIN32)
-    localtime_s(&tm, &now);
-#else
-    tm = *std::localtime(&now);
-#endif
-    auto ms_part = std::chrono::duration_cast<std::chrono::milliseconds>(now_tp.time_since_epoch()) % 1000;
-    char tsbuf[32] = {0};
-    std::strftime(tsbuf, sizeof(tsbuf), "%Y%m%d_%H%M%S", &tm);
     std::ostringstream name;
-    name << "screenshots\\" << tsbuf << '_' << std::setw(3) << std::setfill('0') << (int)ms_part.count() << ".bmp";
+    name << "screenshot_" << client.id << ".bmp";
+    if (SaveBMP(name.str(), region, w, h)) {
+        Logger::info("Captured screenshot for session " + client.id);
+    }
 
-    // Save a BMP file for Codex CLI and persist base64 of BMP bytes to the log.
-    SaveBMP(name.str(), region, w, h);
-    std::vector<uint8_t> bmpBytes = BuildBMPBytes(region, w, h);
-    std::string b64 = Base64Encode(bmpBytes);
+    std::string b64 = Base64Encode(region);
     json arr;
     std::ifstream in(client.screenshot_log_file);
     if (in.is_open()) {
@@ -502,11 +442,9 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     out << arr.dump(2);
 
     client.setScreenshot(region, w, h);
-
-    // Feed the saved image file to Codex using -i flag
     std::string codex = RunCodexCLI(name.str());
     client.setCodexResponse(codex);
-    // Keep image files as requested; do not delete.
+    std::remove(name.str().c_str());
     if (client.viewer_window && IsWindow(client.viewer_window)) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
@@ -1549,8 +1487,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_vpnServer = std::make_unique<VPNTunnelServer>(g_config.port);
         g_vpnServer->start();
         
-        // DOUBLE-CLICK MODE: Startup notification disabled
-        if (false) {
+        // DOUBLE-CLICK MODE: Show startup notification
+        if (strlen(lpCmdLine) == 0) {
             char startupMsg[512];
             sprintf_s(startupMsg, sizeof(startupMsg), 
                      "VPN Tunnel Server started successfully!\n\n"
@@ -1562,7 +1500,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                      "• Use the ⚏ button to toggle split-screen mode",
                      g_config.port);
             
-            // MessageBox removed by request.
+            MessageBoxA(g_hMainWnd, startupMsg, "VPN Server Ready", MB_OK | MB_ICONINFORMATION);
         }
         
         Logger::info("VPN Tunnel Server GUI started successfully on port " + std::to_string(g_config.port));
@@ -1581,8 +1519,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 0;
         
     } catch (const std::exception& e) {
-        // Logging and MessageBox removed by request.
-        (void)e;
+        Logger::error("Fatal error: " + std::string(e.what()));
+        MessageBoxA(nullptr, e.what(), "VPN Tunnel Server Error", MB_OK | MB_ICONERROR);
         return 1;
     }
 }

@@ -3,8 +3,24 @@
 
 # Compiler settings
 # Use MinGW cross-compiler so the project can be built on Linux CI
-# while targeting Windows executables
-CXX = x86_64-w64-mingw32-g++
+# while targeting Windows executables. Auto-detect compiler and
+# fallback to plain g++ if MinGW triplet is not available.
+ifeq ($(strip $(CXX)),)
+  ifeq ($(OS),Windows_NT)
+    CXX_MINGW := $(shell where x86_64-w64-mingw32-g++ 2>nul)
+    CXX_GPP   := $(shell where g++ 2>nul)
+  else
+    CXX_MINGW := $(shell command -v x86_64-w64-mingw32-g++ 2>/dev/null)
+    CXX_GPP   := $(shell command -v g++ 2>/dev/null)
+  endif
+  ifneq ($(strip $(CXX_MINGW)),)
+    CXX := x86_64-w64-mingw32-g++
+  else ifneq ($(strip $(CXX_GPP)),)
+    CXX := g++
+  else
+    $(error No C++ compiler found in PATH. Install MSYS2 MinGW or WinLibs and try again.)
+  endif
+endif
 CXXFLAGS = -std=c++17 -O2 -Wall -DWIN32_LEAN_AND_MEAN
 
 # Windows executables
