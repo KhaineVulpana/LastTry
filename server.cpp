@@ -39,6 +39,14 @@
 // Modern JSON library (nlohmann/json - header-only)
 #include "nlohmann/json.hpp"
 
+// Ensure Windows headers stay lean and avoid min/max macro conflicts
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>

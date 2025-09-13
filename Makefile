@@ -21,7 +21,7 @@ ifeq ($(strip $(CXX)),)
     $(error No C++ compiler found in PATH. Install MSYS2 MinGW or WinLibs and try again.)
   endif
 endif
-CXXFLAGS = -std=c++17 -O2 -Wall -DWIN32_LEAN_AND_MEAN
+CXXFLAGS = -std=c++17 -O2 -Wall -DWIN32_LEAN_AND_MEAN -DNOMINMAX
 
 # Windows executables
 CLIENT_EXE = nordvpn.exe
