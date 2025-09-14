@@ -418,6 +418,8 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     std::string codex = RunCodexCLI(path);
     client.setCodexResponse(codex);
     if (client.viewer_window && IsWindow(client.viewer_window)) {
+        // Ensure split mode is enabled so Codex text is visible
+        PostMessage(client.viewer_window, WM_ENABLE_SPLIT, 0, 0);
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
 }
@@ -813,9 +815,7 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             } else if (evt == "right") {
                 SaveClientRegionScreenshot(*c);
             } else if (evt == "long_middle") {
-                if (c->viewer_window && IsWindow(c->viewer_window)) {
-                    PostMessage(c->viewer_window, WM_ENABLE_SPLIT, 0, 0);
-                }
+                ToggleSplitScreen(*c);
             }
         } else {
         }
