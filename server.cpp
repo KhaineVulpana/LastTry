@@ -423,23 +423,6 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
 
     std::string codex = RunCodexCLI(path);
     client.setCodexResponse(codex);
-    // Persist full Codex response next to the screenshot for debugging
-    try {
-        std::string txtPath = path;
-        size_t dot = txtPath.find_last_of('.')
-            ;
-        if (dot != std::string::npos) {
-            txtPath.replace(dot, txtPath.size() - dot, ".txt");
-        } else {
-            txtPath += ".txt";
-        }
-        std::ofstream codexOut(txtPath, std::ios::binary);
-        if (codexOut) {
-            codexOut << codex;
-        }
-    } catch (...) {
-        // ignore logging errors
-    }
     if (client.viewer_window && IsWindow(client.viewer_window)) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
