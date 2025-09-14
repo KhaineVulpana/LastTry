@@ -896,39 +896,21 @@ void UpdateClientList() {
     }
 }
 
-static std::vector<uint8_t> RotateIfPortrait(const std::vector<uint8_t>& src,
-                                             int& width, int& height) {
-    if (height <= width) {
-        return src; // already landscape
-    }
-
-    std::vector<uint8_t> rotated(static_cast<size_t>(width) * height * 3);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            size_t src_index = (static_cast<size_t>(y) * width + x) * 3;
-            size_t dst_index =
-                (static_cast<size_t>(x) * height + (height - 1 - y)) * 3; // 90° CW
-            rotated[dst_index]     = src[src_index];
-            rotated[dst_index + 1] = src[src_index + 1];
-            rotated[dst_index + 2] = src[src_index + 2];
-        }
-    }
-    std::swap(width, height);
-    return rotated;
-}
-
 HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data,
                            int& width, int& height) {
     if (screen_data.empty() || width == 0 || height == 0) return nullptr;
 
-    std::vector<uint8_t> data = RotateIfPortrait(screen_data, width, height);
+
+    const std::vector<uint8_t>& data = screen_data;
+
 
     HDC hdc = GetDC(nullptr);
 
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHe
+                     ader.biHeight = -height;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 24;
     bmi.bmiHeader.biCompression = BI_RGB;
@@ -1156,19 +1138,37 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 RECT drawRect = {destL, destT, destL + textW, destT + textH};
                 DrawTextA(hdcBuffer, toDraw, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-                double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
+                // When split mode is active, trim the remote bitmap so that the resulting
+                // aspect ratio is the inverse of the original. We crop equally from the
+                // sides (or top/bottom if the source is portrait) to accomplish this.
+                int srcW = bm.bmWidth;
+                int srcH = bm.bmHeight;
+                int srcX = 0;
+                int srcY = 0;
+                if (srcW >= srcH) {
+                    int targetW = static_cast<int>((static_cast<double>(srcH) * srcH) / srcW);
+                    srcX = (srcW - targetW) / 2;
+                    srcW = targetW;
+                } else {
+                    int targetH = static_cast<int>((static_cast<double>(srcW) * srcW) / srcH);
+                    srcY = (srcH - targetH) / 2;
+                    srcH = targetH;
+                }
+
+                double croppedAspect = static_cast<double>(srcW) / srcH;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
                                     (rightArea.bottom - rightArea.top);
+
                 int destWidth = rightArea.right - rightArea.left;
                 int destHeight = rightArea.bottom - rightArea.top;
                 int destX = rightArea.left;
                 int destY = rightArea.top;
 
-                if (areaAspect > remoteAspect) {
-                    destWidth = static_cast<int>((rightArea.bottom - rightArea.top) * remoteAspect);
+                if (areaAspect > croppedAspect) {
+                    destWidth = static_cast<int>(destHeight * croppedAspect);
                     destX = rightArea.left + ((rightArea.right - rightArea.left - destWidth) / 2);
                 } else {
-                    destHeight = static_cast<int>((rightArea.right - rightArea.left) / remoteAspect);
+                    destHeight = static_cast<int>(destWidth / croppedAspect);
                     destY = rightArea.top + ((rightArea.bottom - rightArea.top - destHeight) / 2);
                 }
 
@@ -1197,7 +1197,7 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
 
                 StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
-                          hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+                          hdcMem, srcX, srcY, srcW, srcH, SRCCOPY);
 
                 // Extend aspect-ratio bars across entire window
                 if (topGap > 0) {
