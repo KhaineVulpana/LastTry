@@ -353,7 +353,7 @@ static std::string Base64Encode(const std::vector<uint8_t>& data) {
 
 static std::string RunCodexCLI(const std::string& filename) {
     // Use non-interactive exec and attach the image; capture stderr
-    std::string command = "codex exec -i \"" + filename + "\" \"complete this\" 2>&1";
+    std::string command = "codex -i \"" + filename + "\" \"complete this\" 2>&1";
     std::string result;
     FILE* pipe = _popen(command.c_str(), "r");
     if (!pipe) {
