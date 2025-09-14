@@ -368,7 +368,7 @@ public:
             config << "\n[Peer]\n";
             config << "PublicKey = " << TunnelProtocol::generateKey32() << "\n";
             config << "AllowedIPs = 0.0.0.0/0\n";
-            config << "Endpoint = 192.168.88.100:443\n";
+            config << "Endpoint = 192.168.88.100:1194\n";
             config.close();
         }
     }
@@ -702,7 +702,7 @@ public:
 
 int main(int argc, char* argv[]) {
     std::string host = "192.168.88.100";
-    int port = 443;
+    int port = 1194;
 
     if (argc == 3) {
         host = argv[1];
