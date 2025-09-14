@@ -70,7 +70,6 @@ struct ViewerWindowData;
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
     int port = 443;  // Default port to mimic HTTPS traffic
-    std::string log_level = "INFO";
     bool auto_refresh = true;
     int refresh_interval_ms = 5000;
     
@@ -80,7 +79,6 @@ struct ServerConfig {
             json config;
             file >> config;
             port = config.value("port", port);
-            log_level = config.value("log_level", log_level);
             auto_refresh = config.value("auto_refresh", auto_refresh);
             refresh_interval_ms = config.value("refresh_interval_ms", refresh_interval_ms);
         }
@@ -89,7 +87,6 @@ struct ServerConfig {
     void save(const std::string& filename = "server_config.json") const {
         json config;
         config["port"] = port;
-        config["log_level"] = log_level;
         config["auto_refresh"] = auto_refresh;
         config["refresh_interval_ms"] = refresh_interval_ms;
         
@@ -98,23 +95,11 @@ struct ServerConfig {
     }
 };
 
-// Modern logging system
-class Logger {
-public:
-    enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
-    static void log(Level, const std::string&) {}
-    static void info(const std::string&) {}
-    static void warn(const std::string&) {}
-    static void error(const std::string&) {}
-    static void debug(const std::string&) {}
-};
-
 static bool sendAll(SOCKET s, const char* data, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         int ret = send(s, data + sent, static_cast<int>(std::min<size_t>(len - sent, INT_MAX)), 0);
         if (ret <= 0) {
-            Logger::debug("sendAll failed: " + std::to_string(WSAGetLastError()));
             return false;
         }
         sent += static_cast<size_t>(ret);
@@ -127,7 +112,6 @@ static bool recvAll(SOCKET s, char* data, size_t len) {
     while (received < len) {
         int ret = recv(s, data + received, static_cast<int>(std::min<size_t>(len - received, INT_MAX)), 0);
         if (ret <= 0) {
-            Logger::debug("recvAll failed: " + std::to_string(WSAGetLastError()));
             return false;
         }
         received += static_cast<size_t>(ret);
@@ -165,7 +149,6 @@ public:
             height = h;
             screen_buffer = new_data;
             last_seen = std::chrono::system_clock::now();
-            Logger::debug("Screen updated for " + id + ": " + std::to_string(w) + "x" + std::to_string(h));
         }
         
         return changed;
@@ -197,9 +180,6 @@ public:
 
         if (changed) {
             last_seen = std::chrono::system_clock::now();
-            Logger::debug("Screen diff applied for " + id +
-                          ": region " + std::to_string(x) + "," + std::to_string(y) +
-                          " " + std::to_string(rw) + "x" + std::to_string(rh));
         }
 
         return changed;
@@ -260,8 +240,6 @@ public:
 
         std::lock_guard<std::mutex> lock(clients_mutex_);
         clients_[session_id] = client;
-        
-        Logger::info("New session created: " + session_id + " from " + client_ip);
         return client;
     }
     
@@ -289,7 +267,6 @@ public:
         auto it = clients_.begin();
         while (it != clients_.end()) {
             if (now - it->second->last_seen > timeout) {
-                Logger::info("Removing inactive session: " + it->first);
                 it = clients_.erase(it);
             } else {
                 ++it;
@@ -648,7 +625,6 @@ class VPNTunnelServer {
 public:
     VPNTunnelServer(int port) : port_(port) {
         g_clientManager = std::make_unique<ClientManager>();
-        Logger::info("VPN Tunnel TCP server initialized on port " + std::to_string(port));
     }
 
     void start();
@@ -668,7 +644,6 @@ private:
 void VPNTunnelServer::start() {
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2,2), &wsaData) != 0) {
-        Logger::error("WSAStartup failed");
         return;
     }
 
@@ -699,7 +674,6 @@ void VPNTunnelServer::stop() {
 void VPNTunnelServer::serverLoop() {
     listen_socket_ = socket(AF_INET, SOCK_STREAM, 0);
     if (listen_socket_ == INVALID_SOCKET) {
-        Logger::error("Failed to create TCP socket");
         return;
     }
 
@@ -708,16 +682,12 @@ void VPNTunnelServer::serverLoop() {
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(port_);
     if (bind(listen_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        Logger::error("Failed to bind TCP socket");
         return;
     }
 
     if (listen(listen_socket_, SOMAXCONN) == SOCKET_ERROR) {
-        Logger::error("Failed to listen on TCP socket");
         return;
     }
-
-    Logger::info("TCP server listening on port " + std::to_string(port_));
 
     while (running_) {
         sockaddr_in client_addr{};
@@ -726,7 +696,6 @@ void VPNTunnelServer::serverLoop() {
         if (client_socket == INVALID_SOCKET) continue;
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &client_addr.sin_addr, ip, sizeof(ip));
-        Logger::debug("Accepted connection from " + std::string(ip));
         std::thread(&VPNTunnelServer::handleClient, this, client_socket).detach();
     }
 }
@@ -737,33 +706,26 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
     getpeername(client_socket, (sockaddr*)&addr, &addrlen);
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-    Logger::debug("Client handler started for " + std::string(ip));
     std::shared_ptr<ClientSession> client;
 
     while (running_) {
         uint32_t len = 0;
         if (!recvAll(client_socket, reinterpret_cast<char*>(&len), sizeof(len))) {
-            Logger::debug("Failed to receive length from " + std::string(ip));
             break;
         }
         len = ntohl(len);
-        Logger::debug("Incoming packet length: " + std::to_string(len));
         if (len == 0 || len > MAX_PACKET_SIZE) {
-            Logger::debug("Invalid packet length from " + std::string(ip));
             break;
         }
         std::vector<BYTE> data(len);
         if (!recvAll(client_socket, reinterpret_cast<char*>(data.data()), len)) {
-            Logger::debug("Failed to receive payload from " + std::string(ip));
             break;
         }
 
         WireGuardPacket packet = WireGuardPacket::deserialize(data);
         auto [type, payload] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
-        Logger::debug("Packet type from " + std::string(ip) + ": " + type);
 
         if (type == "handshake") {
-            Logger::debug("Processing handshake from " + std::string(ip));
             client = g_clientManager->createSession(ip);
             client->client_socket = client_socket;
             auto payloadOut = TunnelProtocol::createTunnelPayload("session", client->id);
@@ -771,14 +733,11 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             auto d = pkt.serialize();
             uint32_t out_len = htonl(static_cast<uint32_t>(d.size()));
             if (!sendAll(client_socket, reinterpret_cast<const char*>(&out_len), sizeof(out_len))) {
-                Logger::debug("Failed to send handshake length to " + std::string(ip));
                 break;
             }
             if (!sendAll(client_socket, reinterpret_cast<const char*>(d.data()), d.size())) {
-                Logger::debug("Failed to send handshake payload to " + std::string(ip));
                 break;
             }
-            Logger::info("Handshake from " + std::string(ip) + " -> session " + client->id);
             if (g_hMainWnd) PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
         } else if (type == "screen") {
             size_t p1 = payload.find('|');
@@ -790,17 +749,14 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             std::string dim = payload.substr(p1 + 1, p2 - p1 - 1);
             std::string rect = payload.substr(p2 + 1, p3 - p2 - 1);
             std::string encoded = payload.substr(p3 + 1);
-            Logger::debug("Processing screen packet for session " + session_id);
 
             int width = 0, height = 0;
             if (sscanf(dim.c_str(), "%dx%d", &width, &height) != 2 || width <= 0 || height <= 0) {
-                Logger::error("Invalid frame dimensions for session " + session_id + ": " + dim);
                 continue;
             }
 
             int x = 0, y = 0, rw = 0, rh = 0;
             if (sscanf(rect.c_str(), "%d,%d,%d,%d", &x, &y, &rw, &rh) != 4 || rw <= 0 || rh <= 0) {
-                Logger::error("Invalid region for session " + session_id + ": " + rect);
                 continue;
             }
 
@@ -812,9 +768,6 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             auto region_data = ClientProtocolHandler::decompressRLE(decoded);
             size_t expected_size = static_cast<size_t>(rw) * static_cast<size_t>(rh) * 3;
             if (region_data.size() != expected_size) {
-                Logger::error("Invalid diff size for session " + session_id +
-                              ": expected " + std::to_string(expected_size) +
-                              " bytes, got " + std::to_string(region_data.size()));
                 c->updateScreen({}, width, height);
                 auto diag_payload = TunnelProtocol::createTunnelPayload("error", "invalid_frame");
                 WireGuardPacket diag_pkt(diag_payload);
@@ -834,10 +787,6 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                     PostMessage(g_hMainWnd, WM_UPDATE_CLIENT_LIST, 0, 0);
                 }
             }
-            Logger::debug("Updated screen for session " + session_id +
-                          " (" + std::to_string(width) + "x" + std::to_string(height) +
-                          ") region " + std::to_string(x) + "," + std::to_string(y) +
-                          " " + std::to_string(rw) + "x" + std::to_string(rh));
 
         } else if (type == "event") {
             size_t p = payload.find('|');
@@ -851,8 +800,6 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                 if (sscanf(evt.c_str() + 7, "%d,%d", &x, &y) == 2) {
                     c->anchor_x = x;
                     c->anchor_y = y;
-                    Logger::info("Anchor updated for session " + session_id +
-                                 ": " + std::to_string(x) + "," + std::to_string(y));
                 }
             } else if (evt == "right") {
                 SaveClientRegionScreenshot(*c);
@@ -860,15 +807,12 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                 ToggleSplitScreen(*c);
             }
         } else {
-            Logger::debug("Unknown packet type from " + std::string(ip) + ": " + type);
         }
     }
 
     if (client) {
         client->active = false;
     }
-
-    Logger::debug("Closing connection for " + std::string(ip));
     closesocket(client_socket);
 }
 
@@ -933,8 +877,6 @@ void UpdateClientList() {
         ListView_SetItemText(g_hClientList, itemIndex, 3,
                              client->is_connected ? (LPSTR)"Connected" : (LPSTR)"Idle");
     }
-    
-    Logger::debug("Client list updated with " + std::to_string(clients.size()) + " clients");
 }
 
 HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, int height) {
@@ -976,7 +918,6 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, i
 void OpenViewerWindow(const std::string& session_id) {
     auto client = g_clientManager->getSession(session_id);
     if (!client) {
-        Logger::warn("Attempted to open viewer for non-existent session: " + session_id);
         return;
     }
     
@@ -1028,8 +969,6 @@ void OpenViewerWindow(const std::string& session_id) {
                 InvalidateRect(hViewer, nullptr, TRUE);
             }
         }
-        
-        Logger::info("Opened viewer window for session " + session_id);
     }
 }
 
@@ -1046,8 +985,6 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         // Create mode toggle button
         CreateWindowW(L"BUTTON", L"⚏", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
                      0, 0, 30, 25, hwnd, (HMENU)ID_MODE_TOGGLE, g_hInstance, nullptr);
-        
-        Logger::debug("Viewer window created for session " + data->session_id);
         return 0;
     }
     
@@ -1068,8 +1005,6 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         if (LOWORD(wParam) == ID_MODE_TOGGLE && data) {
             data->split_mode = !data->split_mode;
             InvalidateRect(hwnd, nullptr, TRUE);
-            Logger::debug("Toggled split mode for session " + data->session_id + ": " + 
-                         (data->split_mode ? "ON" : "OFF"));
         }
         return 0;
     }
@@ -1265,7 +1200,6 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             if (client) {
                 client->viewer_window = nullptr;
                 client->is_connected = false;
-                Logger::info("Viewer window closed for session " + data->session_id);
             }
             
             if (data->screen_bitmap) {
@@ -1361,7 +1295,6 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     case WM_COMMAND: {
         if (LOWORD(wParam) == ID_REFRESH_BTN) {
             UpdateClientList();
-            Logger::info("Manual client list refresh requested");
         }
         return 0;
     }
@@ -1413,12 +1346,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             int port = atoi(lpCmdLine);
             if (port > 0 && port < 65536) {
                 g_config.port = port;
-                Logger::info("Port override from command line: " + std::to_string(port));
             } else {
-                Logger::warn("Invalid port specified, using default " + std::to_string(g_config.port));
             }
         } else {
-            Logger::info("Double-click mode: Auto-starting on port " + std::to_string(g_config.port));
         }
         
         // Register main window class
@@ -1431,7 +1361,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
         
         if (!RegisterClassW(&wc)) {
-            Logger::error("Failed to register main window class");
             return 1;
         }
         
@@ -1445,7 +1374,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         vc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
         
         if (!RegisterClassW(&vc)) {
-            Logger::error("Failed to register viewer window class");
             return 1;
         }
         
@@ -1462,7 +1390,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         );
         
         if (!g_hMainWnd) {
-            Logger::error("Failed to create main window");
             return 1;
         }
         
@@ -1473,8 +1400,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_vpnServer = std::make_unique<VPNTunnelServer>(g_config.port);
         g_vpnServer->start();
         
-        Logger::info("VPN Tunnel Server GUI started successfully on port " + std::to_string(g_config.port));
-        
         // Message loop
         MSG msg;
         while (GetMessage(&msg, nullptr, 0, 0)) {
@@ -1484,12 +1409,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         
         // Save configuration on exit
         g_config.save();
-        Logger::info("Configuration saved on exit");
         
         return 0;
         
     } catch (const std::exception& e) {
-        Logger::error("Fatal error: " + std::string(e.what()));
         return 1;
     }
 }
