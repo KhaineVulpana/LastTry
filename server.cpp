@@ -415,12 +415,6 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     out << arr.dump(2);
 
     client.setScreenshot(region, w, h);
-    // Show a visible pending state while Codex runs
-    client.setCodexResponse("Codex response pending...");
-    if (client.viewer_window && IsWindow(client.viewer_window)) {
-        PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
-    }
-
     std::string codex = RunCodexCLI(path);
     client.setCodexResponse(codex);
     if (client.viewer_window && IsWindow(client.viewer_window)) {
