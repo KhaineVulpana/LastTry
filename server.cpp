@@ -995,6 +995,12 @@ void OpenViewerWindow(const std::string& session_id) {
         SetWindowPos(hViewer, HWND_TOPMOST, 0, 0, screenW, screenH, SWP_SHOWWINDOW);
         UpdateWindow(hViewer);
 
+        // Ensure legacy toggle button is hidden
+        if (HWND hToggle = GetDlgItem(hViewer, ID_MODE_TOGGLE)) {
+            ShowWindow(hToggle, SW_HIDE);
+            EnableWindow(hToggle, FALSE);
+        }
+
         // Update screen if we already have data
         if (!screen_data.empty()) {
             ViewerWindowData* window_data = (ViewerWindowData*)GetWindowLongPtr(hViewer, GWLP_USERDATA);
@@ -1032,25 +1038,11 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     }
     
     case WM_SIZE: {
-        // Reposition mode toggle button
-        HWND hToggle = GetDlgItem(hwnd, ID_MODE_TOGGLE);
-        if (hToggle) {
-            RECT clientRect;
-            GetClientRect(hwnd, &clientRect);
-            SetWindowPos(hToggle, HWND_TOP, clientRect.right - 35, 5, 30, 25, SWP_NOZORDER);
-        }
-        
         InvalidateRect(hwnd, nullptr, TRUE);
         return 0;
     }
     
-    case WM_COMMAND: {
-        if (LOWORD(wParam) == ID_MODE_TOGGLE && data) {
-            data->split_mode = !data->split_mode;
-            InvalidateRect(hwnd, nullptr, TRUE);
-        }
-        return 0;
-    }
+    
     
     case WM_NEW_SCREEN_DATA: {
         if (data) {
