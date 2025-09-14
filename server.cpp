@@ -1003,8 +1003,7 @@ void OpenViewerWindow(const std::string& session_id) {
             }
         }
 
-        // Enter split mode on open so side-by-side is visible
-        PostMessage(hViewer, WM_ENABLE_SPLIT, 0, 0);
+        // Do not auto-enable split mode on open; user toggles via control/gesture
     }
 }
 
