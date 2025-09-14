@@ -11,7 +11,7 @@
  * g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN server.cpp -o server.exe -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
  * 
  * VPN Port Strategy:
- * - Port 443 (HTTPS): Default port to disguise tunnel traffic
+ * - Port 1194 (UDP): Default port for regular NordVPN traffic
  * - Avoid 8080: Too obvious as alt-HTTP, not VPN-related
  */
 
@@ -70,7 +70,7 @@ struct ViewerWindowData;
 
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
-    int port = 443;  // Default port to mimic HTTPS traffic
+    int port = 1194;  // Default port to match NordVPN regular traffic
     bool auto_refresh = true;
     int refresh_interval_ms = 5000;
     
