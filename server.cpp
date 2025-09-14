@@ -351,17 +351,25 @@ static std::string Base64Encode(const std::vector<uint8_t>& data) {
 }
 
 static std::string RunCodexCLI(const std::string& filename) {
-    std::string command = "codex \"" + filename + "\" \"complete this\"";
+    // Capture stderr too so the UI can show useful errors
+    std::string command = "codex \"" + filename + "\" \"complete this\" 2>&1";
     std::string result;
     FILE* pipe = _popen(command.c_str(), "r");
     if (!pipe) {
-        return result;
+        return std::string("Codex CLI not available (popen failed)");
     }
-    char buffer[256];
+    char buffer[512];
     while (fgets(buffer, sizeof(buffer), pipe)) {
         result += buffer;
     }
     _pclose(pipe);
+    // Trim trailing whitespace
+    while (!result.empty() && (result.back() == '\\n' || result.back() == '\\r' || result.back() == ' ')) {
+        result.pop_back();
+    }
+    if (result.empty()) {
+        result = "Codex produced no output";
+    }
     return result;
 }
 
