@@ -26,7 +26,6 @@
 #include <memory>
 #include <functional>
 #include <fstream>
-#include <iomanip>
 #include <random>
 #include <sstream>
 #include <atomic>
@@ -36,6 +35,7 @@
 #include <cstdio>
 #include <cstring>
 #include <direct.h>
+#include <cstdlib>
 
 // Modern JSON library (nlohmann/json - header-only)
 #include "nlohmann/json.hpp"
@@ -45,6 +45,9 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <windowsx.h>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 using json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -138,7 +141,6 @@ public:
     std::vector<uint8_t> screenshot_buffer;
     int screenshot_width = 0;
     int screenshot_height = 0;
-    std::string screenshot_log_file;
     std::string codex_response;
     
     // Update screen data with automatic change detection
@@ -234,12 +236,6 @@ public:
         client->last_seen = std::chrono::system_clock::now();
         client->active = true;
 
-        std::ostringstream logname;
-        logname << "screenshots_" << session_id << ".txt";
-        client->screenshot_log_file = logname.str();
-        std::ofstream log_file(client->screenshot_log_file);
-        log_file << "[]";
-
         std::lock_guard<std::mutex> lock(clients_mutex_);
         clients_[session_id] = client;
         return client;
@@ -296,63 +292,21 @@ private:
     }
 };
 
-static bool SaveBMP(const std::string& filename, const std::vector<uint8_t>& data, int width, int height) {
-    BITMAPFILEHEADER bfh{};
-    BITMAPINFOHEADER bih{};
-    int rowSize = width * 3;
-    int padding = (4 - (rowSize % 4)) % 4;
-    int dataSize = (rowSize + padding) * height;
 
-    bfh.bfType = 0x4D42;
-    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-    bfh.bfSize = bfh.bfOffBits + dataSize;
-
-    bih.biSize = sizeof(BITMAPINFOHEADER);
-    bih.biWidth = width;
-    bih.biHeight = -height;
-    bih.biPlanes = 1;
-    bih.biBitCount = 24;
-    bih.biCompression = BI_RGB;
-    bih.biSizeImage = dataSize;
-
-    std::ofstream file(filename, std::ios::binary);
-    if (!file) return false;
-    file.write(reinterpret_cast<const char*>(&bfh), sizeof(bfh));
-    file.write(reinterpret_cast<const char*>(&bih), sizeof(bih));
-
-    for (int y = 0; y < height; ++y) {
-        file.write(reinterpret_cast<const char*>(data.data() + y * width * 3), rowSize);
-        if (padding) {
-            uint8_t pad[3] = {0,0,0};
-            file.write(reinterpret_cast<const char*>(pad), padding);
-        }
-    }
-    return true;
+static void StbiWriteCallback(void* context, void* data, int size) {
+    auto* out = reinterpret_cast<std::vector<uint8_t>*>(context);
+    unsigned char* bytes = static_cast<unsigned char*>(data);
+    out->insert(out->end(), bytes, bytes + size);
 }
 
-static std::string Base64Encode(const std::vector<uint8_t>& data) {
-    static const char encode_chars[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    int val = 0, valb = -6;
-    for (uint8_t c : data) {
-        val = (val << 8) + c;
-        valb += 8;
-        while (valb >= 0) {
-            out.push_back(encode_chars[(val >> valb) & 0x3F]);
-            valb -= 6;
-        }
-    }
-    if (valb > -6) {
-        out.push_back(encode_chars[((val << 8) >> (valb + 8)) & 0x3F]);
-    }
-    while (out.size() % 4) {
-        out.push_back('=');
-    }
+static std::vector<uint8_t> EncodeJPEG(const std::vector<uint8_t>& data, int width, int height, int quality = 90) {
+    std::vector<uint8_t> out;
+    stbi_write_jpg_to_func(StbiWriteCallback, &out, width, height, 3, data.data(), quality);
     return out;
 }
 
-static std::string RunCodexCLI(const std::string& filename) {
+
+[[maybe_unused]] static std::string RunCodexCLI(const std::string& filename) {
     // Use non-interactive exec and attach the image; capture stderr
     std::string command = "codex -i \"" + filename + "\" \"complete this\" 2>&1";
     std::string result;
@@ -411,32 +365,18 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
                screen.data() + ((y + row) * width + x) * 3,
                w * 3);
     }
+    auto jpeg = EncodeJPEG(region, w, h);
     SYSTEMTIME st;
     GetLocalTime(&st);
     char dateFolder[16];
     sprintf_s(dateFolder, "%04d-%02d-%02d", st.wYear, st.wMonth, st.wDay);
     _mkdir(dateFolder);
     char timeName[16];
-    sprintf_s(timeName, "%02d-%02d-%02d.bmp", st.wHour, st.wMinute, st.wSecond);
+    sprintf_s(timeName, "%02d-%02d-%02d.jpg", st.wHour, st.wMinute, st.wSecond);
     std::string path = std::string(dateFolder) + "\\" + timeName;
-    SaveBMP(path, region, w, h);
-
-    std::string b64 = Base64Encode(region);
-    json arr;
-    std::ifstream in(client.screenshot_log_file);
-    if (in.is_open()) {
-        try {
-            in >> arr;
-        } catch (...) {
-            arr = json::array();
-        }
-    } else {
-        arr = json::array();
-    }
-    in.close();
-    arr.push_back(b64);
-    std::ofstream out(client.screenshot_log_file);
-    out << arr.dump(2);
+    std::ofstream jpgFile(path, std::ios::binary);
+    jpgFile.write(reinterpret_cast<const char*>(jpeg.data()), jpeg.size());
+    jpgFile.close();
 
     client.setScreenshot(region, w, h);
     // Indicate pending state while Codex runs
