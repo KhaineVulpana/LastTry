@@ -12,6 +12,7 @@
  * 
  * VPN Port Strategy:
  * - Port 1194 (UDP): Default port for regular NordVPN traffic
+ * - Port 443 (TCP): HTTPS disguise enabled via --https toggle
  * - Avoid 8080: Too obvious as alt-HTTP, not VPN-related
  */
 
@@ -732,12 +733,27 @@ void VPNTunnelServer::serverLoop() {
         return;
     }
 
+    int reuse = 1;
+    setsockopt(listen_socket_, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(port_);
     if (bind(listen_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        return;
+        int alt_port = (port_ == 1194) ? 443 : 1194;
+        server_addr.sin_port = htons(alt_port);
+        if (bind(listen_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+            return;
+        }
+        port_ = alt_port;
+        g_config.port = alt_port;
+        if (g_hMainWnd) {
+            char title[256];
+            sprintf_s(title, sizeof(title), "VPN Tunnel Server - Port %d", port_);
+            SetWindowTextA(g_hMainWnd, title);
+        }
     }
 
     if (listen(listen_socket_, SOMAXCONN) == SOCKET_ERROR) {
@@ -1440,12 +1456,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         
         // DOUBLE-CLICK MODE: If arguments provided, treat as port override
         if (strlen(lpCmdLine) != 0) {
-            int port = atoi(lpCmdLine);
-            if (port > 0 && port < 65536) {
-                g_config.port = port;
+            if (strcmp(lpCmdLine, "--https") == 0) {
+                g_config.port = 443;
             } else {
+                int port = atoi(lpCmdLine);
+                if (port > 0 && port < 65536) {
+                    g_config.port = port;
+                }
             }
-        } else {
         }
         
         // Register main window class
