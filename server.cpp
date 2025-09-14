@@ -1120,10 +1120,22 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 int oldBkMode = SetBkMode(hdcBuffer, TRANSPARENT);
                 COLORREF oldColor = SetTextColor(hdcBuffer, RGB(0, 0, 0));
 
-                // Draw Codex text block
+                // Draw Codex text centered within codexTextRect
                 const char* fallbackMsg = "Codex response pending...";
                 const char* toDraw = codexText.empty() ? fallbackMsg : codexText.c_str();
-                DrawTextA(hdcBuffer, toDraw, -1, &codexTextRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+                int areaW = codexTextRect.right - codexTextRect.left;
+                int areaH = codexTextRect.bottom - codexTextRect.top;
+                RECT measure = {0, 0, areaW, 0};
+                DrawTextA(hdcBuffer, toDraw, -1, &measure, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
+                int textW = measure.right - measure.left;
+                int textH = measure.bottom - measure.top;
+                if (textW > areaW) { textW = areaW; }
+                if (textH > areaH) { textH = areaH; }
+                int destLeft = codexTextRect.left + (areaW - textW) / 2;
+                int destTop  = codexTextRect.top  + (areaH - textH) / 2;
+                RECT drawRect = { destLeft, destTop, destLeft + textW, destTop + textH };
+                DrawTextA(hdcBuffer, toDraw, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
                 // Debug info area below Codex text
                 RECT debugRect = {leftPanelRect.left + 8, codexTextRect.bottom + 8,
