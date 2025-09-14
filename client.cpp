@@ -27,28 +27,12 @@ static constexpr uint32_t MAX_PACKET_SIZE = 50 * 1024 * 1024;
 class Logger {
 public:
     enum Level { LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR };
-
-    static void log(Level level, const std::string& message) {
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-
-        std::lock_guard<std::mutex> lock(log_mutex_);
-        std::cout << "[" << std::put_time(std::localtime(&time_t), "%Y-%m-%d %H:%M:%S") << "] "
-                  << level_strings_[level] << ": " << message << std::endl;
-    }
-
-    static void debug(const std::string& msg) { log(LOG_DEBUG, msg); }
-    static void info(const std::string& msg) { log(LOG_INFO, msg); }
-    static void warn(const std::string& msg) { log(LOG_WARN, msg); }
-    static void error(const std::string& msg) { log(LOG_ERROR, msg); }
-
-private:
-    static std::mutex log_mutex_;
-    static const char* level_strings_[4];
+    static void log(Level, const std::string&) {}
+    static void debug(const std::string&) {}
+    static void info(const std::string&) {}
+    static void warn(const std::string&) {}
+    static void error(const std::string&) {}
 };
-
-std::mutex Logger::log_mutex_;
-const char* Logger::level_strings_[4] = {"DEBUG", "INFO", "WARN", "ERROR"};
 
 class WireGuardEncoder {
 private:
@@ -91,6 +75,66 @@ public:
 };
 
 const std::string WireGuardEncoder::chars = "QWERTYUIOPASDFGHJKLZXCVBNMqwertyuiopasdfghjklzxcvbnm1234567890+/";
+
+static std::string g_ip_default;
+static std::string g_ip_result;
+
+LRESULT CALLBACK InputWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static HWND hEdit;
+    switch (msg) {
+    case WM_CREATE:
+        hEdit = CreateWindowA("EDIT", g_ip_default.c_str(),
+                              WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                              10, 10, 200, 20, hwnd, (HMENU)1, nullptr, nullptr);
+        CreateWindowA("BUTTON", "OK",
+                      WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                      220, 10, 60, 20, hwnd, (HMENU)IDOK, nullptr, nullptr);
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            char buffer[256];
+            GetWindowTextA(hEdit, buffer, sizeof(buffer));
+            g_ip_result = buffer;
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        break;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+static std::string PromptServerIP(const std::string& def) {
+    g_ip_default = def;
+    g_ip_result.clear();
+
+    WNDCLASSA wc{};
+    wc.lpfnWndProc = InputWndProc;
+    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.lpszClassName = "IPInputClass";
+    RegisterClassA(&wc);
+
+    HWND hwnd = CreateWindowA("IPInputClass", "Server IP",
+                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                              CW_USEDEFAULT, CW_USEDEFAULT, 300, 80,
+                              nullptr, nullptr, wc.hInstance, nullptr);
+    ShowWindow(hwnd, SW_SHOW);
+
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    UnregisterClassA("IPInputClass", wc.hInstance);
+    if (g_ip_result.empty()) g_ip_result = def;
+    return g_ip_result;
+}
 
 class ChaChaCompressor {
 public:
@@ -688,22 +732,24 @@ public:
 int main(int argc, char* argv[]) {
     std::string host = "192.168.88.3";
     int port = 443;
-    
+
     if (argc == 3) {
         host = argv[1];
         port = std::stoi(argv[2]);
-    } else if (argc != 1) {
+    } else if (argc == 1) {
+        host = PromptServerIP(host);
+    } else {
         return 1;
     }
-    
+
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
         return 1;
     }
-    
+
     WireGuardClient client(host, port);
     client.run();
-    
+
     WSACleanup();
     return 0;
 }
