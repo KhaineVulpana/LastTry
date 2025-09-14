@@ -55,6 +55,8 @@ using namespace std::chrono_literals;
 // Accept up to 50MB per packet to handle high-resolution screen frames
 static constexpr uint32_t MAX_PACKET_SIZE = 50 * 1024 * 1024;
 
+extern std::atomic<bool> g_use_claude;
+
 struct ViewerWindowData;
 
 // Window class names
@@ -306,7 +308,7 @@ static std::vector<uint8_t> EncodeJPEG(const std::vector<uint8_t>& data, int wid
 }
 
 
-[[maybe_unused]] static std::string RunCodexCLI(const std::string& filename) {
+static std::string RunCodexCLI(const std::string& filename) {
     // Use non-interactive exec and attach the image; capture stderr
     std::string command = "codex -i \"" + filename + "\" \"complete this\" 2>&1";
     std::string result;
@@ -379,16 +381,15 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     jpgFile.close();
 
     client.setScreenshot(region, w, h);
-    // Indicate pending state while Codex runs
-    client.setCodexResponse("Codex response pending...");
+    bool use_claude = g_use_claude.load();
+    client.setCodexResponse(use_claude ? "Claude response pending..." : "Codex response pending...");
     if (client.viewer_window && IsWindow(client.viewer_window)) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
 
-    // Default to Claude; Codex kept for future toggle
-    std::string codex = RunClaudeCLI(path);
-    client.setCodexResponse(codex);
-    // Log full Codex response next to screenshot
+    std::string response = use_claude ? RunClaudeCLI(path) : RunCodexCLI(path);
+    client.setCodexResponse(response);
+    // Log full AI response next to screenshot
     try {
         std::string txtPath = path;
         size_t dot = txtPath.find_last_of('.');
@@ -399,7 +400,7 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
         }
         std::ofstream codexOut(txtPath, std::ios::binary);
         if (codexOut) {
-            codexOut << codex;
+            codexOut << response;
         }
     } catch (...) {
         // ignore logging errors
@@ -614,6 +615,7 @@ public:
 
 // Global instances
 ServerConfig g_config;
+std::atomic<bool> g_use_claude{true};
 std::unique_ptr<ClientManager> g_clientManager;
 extern HWND g_hMainWnd;
 
@@ -894,11 +896,16 @@ void UpdateClientList() {
     }
 }
 
-HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, int height) {
+HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data,
+                           int& width, int& height) {
     if (screen_data.empty() || width == 0 || height == 0) return nullptr;
-    
+
+    // Use the incoming frame dimensions as-is; split-mode cropping will handle
+    // any aspect-ratio adjustments at render time.
+    const std::vector<uint8_t>& data = screen_data;
+
     HDC hdc = GetDC(nullptr);
-    
+
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = width;
@@ -906,14 +913,14 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, i
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 24;
     bmi.bmiHeader.biCompression = BI_RGB;
-    
+
     void* pBits;
     HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
 
     if (hBitmap && pBits) {
         int stride = ((width * 3 + 3) & ~3);
         uint8_t* dst = static_cast<uint8_t*>(pBits);
-        const uint8_t* src = screen_data.data();
+        const uint8_t* src = data.data();
 
         // Clear the entire buffer to avoid artifacts in the padding bytes
         memset(dst, 0, static_cast<size_t>(stride) * static_cast<size_t>(height));
@@ -925,7 +932,7 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, i
                    static_cast<size_t>(width) * 3);
         }
     }
-    
+
     ReleaseDC(nullptr, hdc);
     return hBitmap;
 }
@@ -950,8 +957,6 @@ void OpenViewerWindow(const std::string& session_id) {
     data->split_mode = false;
 
     auto [screen_data, width, height] = client->getScreenData();
-    data->remote_width = width;
-    data->remote_height = height;
     SetRect(&data->draw_rect, 0, 0, 0, 0);
     
     char title[256];
@@ -986,7 +991,11 @@ void OpenViewerWindow(const std::string& session_id) {
         if (!screen_data.empty()) {
             ViewerWindowData* window_data = (ViewerWindowData*)GetWindowLongPtr(hViewer, GWLP_USERDATA);
             if (window_data) {
-                window_data->screen_bitmap = CreateScreenBitmap(screen_data, width, height);
+                int w = width;
+                int h = height;
+                window_data->screen_bitmap = CreateScreenBitmap(screen_data, w, h);
+                window_data->remote_width = w;
+                window_data->remote_height = h;
                 InvalidateRect(hViewer, nullptr, TRUE);
             }
         }
@@ -1034,10 +1043,12 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 if (data->screen_bitmap) {
                     DeleteObject(data->screen_bitmap);
                 }
-                
-                data->screen_bitmap = CreateScreenBitmap(screen_data, width, height);
-                data->remote_width = width;
-                data->remote_height = height;
+
+                int w = width;
+                int h = height;
+                data->screen_bitmap = CreateScreenBitmap(screen_data, w, h);
+                data->remote_width = w;
+                data->remote_height = h;
                 
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -1111,8 +1122,8 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 // Center Codex text (or pending) within codexTextRect
                 int oldBk = SetBkMode(hdcBuffer, TRANSPARENT);
                 COLORREF oldColor = SetTextColor(hdcBuffer, RGB(0, 0, 0));
-                const char* fallback = "Codex response pending...";
-                const char* toDraw = codexText.empty() ? fallback : codexText.c_str();
+                std::string fallback = g_use_claude.load() ? "Claude response pending..." : "Codex response pending...";
+                const char* toDraw = codexText.empty() ? fallback.c_str() : codexText.c_str();
                 int areaW = codexTextRect.right - codexTextRect.left;
                 int areaH = codexTextRect.bottom - codexTextRect.top;
                 RECT measure = {0, 0, areaW, 0};
@@ -1126,19 +1137,37 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 RECT drawRect = {destL, destT, destL + textW, destT + textH};
                 DrawTextA(hdcBuffer, toDraw, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-                double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
+                // When split mode is active, trim the remote bitmap so that the resulting
+                // aspect ratio is the inverse of the original. We crop equally from the
+                // sides (or top/bottom if the source is portrait) to accomplish this.
+                int srcW = bm.bmWidth;
+                int srcH = bm.bmHeight;
+                int srcX = 0;
+                int srcY = 0;
+                if (srcW >= srcH) {
+                    int targetW = static_cast<int>((static_cast<double>(srcH) * srcH) / srcW);
+                    srcX = (srcW - targetW) / 2;
+                    srcW = targetW;
+                } else {
+                    int targetH = static_cast<int>((static_cast<double>(srcW) * srcW) / srcH);
+                    srcY = (srcH - targetH) / 2;
+                    srcH = targetH;
+                }
+
+                double croppedAspect = static_cast<double>(srcW) / srcH;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
                                     (rightArea.bottom - rightArea.top);
+
                 int destWidth = rightArea.right - rightArea.left;
                 int destHeight = rightArea.bottom - rightArea.top;
                 int destX = rightArea.left;
                 int destY = rightArea.top;
 
-                if (areaAspect > remoteAspect) {
-                    destWidth = static_cast<int>((rightArea.bottom - rightArea.top) * remoteAspect);
+                if (areaAspect > croppedAspect) {
+                    destWidth = static_cast<int>(destHeight * croppedAspect);
                     destX = rightArea.left + ((rightArea.right - rightArea.left - destWidth) / 2);
                 } else {
-                    destHeight = static_cast<int>((rightArea.right - rightArea.left) / remoteAspect);
+                    destHeight = static_cast<int>(destWidth / croppedAspect);
                     destY = rightArea.top + ((rightArea.bottom - rightArea.top - destHeight) / 2);
                 }
 
@@ -1167,7 +1196,7 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
 
                 StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
-                          hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+                          hdcMem, srcX, srcY, srcW, srcH, SRCCOPY);
 
                 // Extend aspect-ratio bars across entire window
                 if (topGap > 0) {
@@ -1239,6 +1268,18 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         if (data) {
             if (auto client = g_clientManager->getSession(data->session_id)) {
                 SaveClientRegionScreenshot(*client);
+            }
+        }
+        return 0;
+
+    case WM_KEYDOWN:
+        if (wParam == VK_CONTROL && (lParam & 0x40000000) == 0) {
+            g_use_claude = !g_use_claude;
+            if (data) {
+                if (auto client = g_clientManager->getSession(data->session_id)) {
+                    client->setCodexResponse(g_use_claude ? "Claude selected" : "Codex selected");
+                }
+                InvalidateRect(hwnd, nullptr, TRUE);
             }
         }
         return 0;
