@@ -753,6 +753,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
+
     if (!hostProvided) {
         host = PromptServerIP(host);
     }
