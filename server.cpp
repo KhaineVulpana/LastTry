@@ -894,11 +894,35 @@ void UpdateClientList() {
     }
 }
 
-HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, int height) {
+static std::vector<uint8_t> RotateIfPortrait(const std::vector<uint8_t>& src,
+                                             int& width, int& height) {
+    if (height <= width) {
+        return src; // already landscape
+    }
+
+    std::vector<uint8_t> rotated(static_cast<size_t>(width) * height * 3);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            size_t src_index = (static_cast<size_t>(y) * width + x) * 3;
+            size_t dst_index =
+                (static_cast<size_t>(x) * height + (height - 1 - y)) * 3; // 90° CW
+            rotated[dst_index]     = src[src_index];
+            rotated[dst_index + 1] = src[src_index + 1];
+            rotated[dst_index + 2] = src[src_index + 2];
+        }
+    }
+    std::swap(width, height);
+    return rotated;
+}
+
+HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data,
+                           int& width, int& height) {
     if (screen_data.empty() || width == 0 || height == 0) return nullptr;
-    
+
+    std::vector<uint8_t> data = RotateIfPortrait(screen_data, width, height);
+
     HDC hdc = GetDC(nullptr);
-    
+
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = width;
@@ -906,14 +930,14 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, i
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 24;
     bmi.bmiHeader.biCompression = BI_RGB;
-    
+
     void* pBits;
     HBITMAP hBitmap = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
 
     if (hBitmap && pBits) {
         int stride = ((width * 3 + 3) & ~3);
         uint8_t* dst = static_cast<uint8_t*>(pBits);
-        const uint8_t* src = screen_data.data();
+        const uint8_t* src = data.data();
 
         // Clear the entire buffer to avoid artifacts in the padding bytes
         memset(dst, 0, static_cast<size_t>(stride) * static_cast<size_t>(height));
@@ -925,7 +949,7 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data, int width, i
                    static_cast<size_t>(width) * 3);
         }
     }
-    
+
     ReleaseDC(nullptr, hdc);
     return hBitmap;
 }
@@ -950,8 +974,6 @@ void OpenViewerWindow(const std::string& session_id) {
     data->split_mode = false;
 
     auto [screen_data, width, height] = client->getScreenData();
-    data->remote_width = width;
-    data->remote_height = height;
     SetRect(&data->draw_rect, 0, 0, 0, 0);
     
     char title[256];
@@ -986,7 +1008,11 @@ void OpenViewerWindow(const std::string& session_id) {
         if (!screen_data.empty()) {
             ViewerWindowData* window_data = (ViewerWindowData*)GetWindowLongPtr(hViewer, GWLP_USERDATA);
             if (window_data) {
-                window_data->screen_bitmap = CreateScreenBitmap(screen_data, width, height);
+                int w = width;
+                int h = height;
+                window_data->screen_bitmap = CreateScreenBitmap(screen_data, w, h);
+                window_data->remote_width = w;
+                window_data->remote_height = h;
                 InvalidateRect(hViewer, nullptr, TRUE);
             }
         }
@@ -1034,10 +1060,12 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 if (data->screen_bitmap) {
                     DeleteObject(data->screen_bitmap);
                 }
-                
-                data->screen_bitmap = CreateScreenBitmap(screen_data, width, height);
-                data->remote_width = width;
-                data->remote_height = height;
+
+                int w = width;
+                int h = height;
+                data->screen_bitmap = CreateScreenBitmap(screen_data, w, h);
+                data->remote_width = w;
+                data->remote_height = h;
                 
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
