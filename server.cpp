@@ -377,7 +377,7 @@ static std::string RunCodexCLI(const std::string& filename) {
 // Same behavior as RunCodexCLI, but invokes a Claude CLI instead.
 // It attempts: claude -i "<image>" "complete this" and captures stdout+stderr.
 static std::string RunClaudeCLI(const std::string& filename) {
-    std::string command = "claude Use the screenshot-code-analyzer with this image C:\Users\psybo\Desktop\New folder\\" + filename;
+    std::string command = "claude Use the screenshot-code-analyzer with this image C:\Users\psybo\Desktop\New folder" + "\\" + filename;
     std::string result;
     FILE* pipe = _popen(command.c_str(), "r");
     if (!pipe) {
