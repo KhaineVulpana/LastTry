@@ -66,6 +66,7 @@ struct ViewerWindowData;
 #define WM_UPDATE_CLIENT_LIST (WM_USER + 1)
 #define WM_NEW_SCREEN_DATA (WM_USER + 2)
 #define WM_NEW_SCREENSHOT (WM_USER + 3)
+#define WM_ENABLE_SPLIT    (WM_USER + 4)
 
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
@@ -414,6 +415,12 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     out << arr.dump(2);
 
     client.setScreenshot(region, w, h);
+    // Show a visible pending state while Codex runs
+    client.setCodexResponse("Codex response pending...");
+    if (client.viewer_window && IsWindow(client.viewer_window)) {
+        PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
+    }
+
     std::string codex = RunCodexCLI(path);
     client.setCodexResponse(codex);
     if (client.viewer_window && IsWindow(client.viewer_window)) {
@@ -812,7 +819,9 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             } else if (evt == "right") {
                 SaveClientRegionScreenshot(*c);
             } else if (evt == "long_middle") {
-                ToggleSplitScreen(*c);
+                if (c->viewer_window && IsWindow(c->viewer_window)) {
+                    PostMessage(c->viewer_window, WM_ENABLE_SPLIT, 0, 0);
+                }
             }
         } else {
         }
@@ -985,6 +994,13 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     ViewerWindowData* data = (ViewerWindowData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     
     switch (uMsg) {
+    case WM_ENABLE_SPLIT: {
+        if (data) {
+            data->split_mode = true;
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+    }
     case WM_CREATE: {
         CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
         data = (ViewerWindowData*)cs->lpCreateParams;
@@ -1094,11 +1110,47 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 SelectObject(hdcBuffer, oldPen);
                 DeleteObject(pen);
 
-                // Fetch Codex text and render it last so it isn't covered
+                // Fetch Codex text
                 std::string codexText;
                 if (auto client = g_clientManager->getSession(data->session_id)) {
                     codexText = client->getCodexResponse();
                 }
+
+                // Ensure consistent text rendering
+                int oldBkMode = SetBkMode(hdcBuffer, TRANSPARENT);
+                COLORREF oldColor = SetTextColor(hdcBuffer, RGB(0, 0, 0));
+
+                // Draw Codex text block
+                const char* fallbackMsg = "Codex response pending...";
+                const char* toDraw = codexText.empty() ? fallbackMsg : codexText.c_str();
+                DrawTextA(hdcBuffer, toDraw, -1, &codexTextRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+                // Debug info area below Codex text
+                RECT debugRect = {leftPanelRect.left + 8, codexTextRect.bottom + 8,
+                                  leftPanelRect.right - 8, std::min(leftPanelRect.bottom - 8, codexTextRect.bottom + 120)};
+                std::string debugText = "Debug:\n";
+                debugText += std::string("split_mode: ") + (data->split_mode ? "true" : "false") + "\n";
+                debugText += "remote: " + std::to_string(data->remote_width) + "x" + std::to_string(data->remote_height) + "\n";
+                if (auto clientDbg = g_clientManager->getSession(data->session_id)) {
+                    auto [shotBuf, sw, sh] = clientDbg->getScreenshot();
+                    debugText += "screenshot: " + std::to_string(sw) + "x" + std::to_string(sh);
+                    if (shotBuf.empty()) debugText += " (none)";
+                    debugText += "\n";
+                    auto cx = clientDbg->getCodexResponse();
+                    debugText += "codex_len: " + std::to_string(cx.size()) + "\n";
+                    // Include a short preview to verify visibility
+                    std::string preview = cx.substr(0, 128);
+                    for (char& ch : preview) { if (ch == '\r') ch = ' '; }
+                    debugText += "codex_preview: " + preview + "\n";
+                } else {
+                    debugText += "client: not found\n";
+                }
+                DrawTextA(hdcBuffer, debugText.c_str(), -1, &debugRect,
+                          DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+                // Restore DC state
+                SetTextColor(hdcBuffer, oldColor);
+                SetBkMode(hdcBuffer, oldBkMode);
 
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
