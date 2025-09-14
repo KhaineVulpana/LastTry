@@ -374,6 +374,29 @@ static std::string RunCodexCLI(const std::string& filename) {
     return result;
 }
 
+// Same behavior as RunCodexCLI, but invokes a Claude CLI instead.
+// It attempts: claude -i "<image>" "complete this" and captures stdout+stderr.
+static std::string RunClaudeCLI(const std::string& filename) {
+    std::string command = "claude -i \"" + filename + "\" \"complete this\" 2>&1";
+    std::string result;
+    FILE* pipe = _popen(command.c_str(), "r");
+    if (!pipe) {
+        return std::string("Claude CLI not available (popen failed)");
+    }
+    char buffer[512];
+    while (fgets(buffer, sizeof(buffer), pipe)) {
+        result += buffer;
+    }
+    _pclose(pipe);
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' ')) {
+        result.pop_back();
+    }
+    if (result.empty()) {
+        result = "Claude produced no output";
+    }
+    return result;
+}
+
 static void SaveClientRegionScreenshot(ClientSession& client) {
     auto [screen, width, height] = client.getScreenData();
     int x = std::clamp(client.anchor_x, 0, width > 0 ? width - 1 : 0);
@@ -421,7 +444,8 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
 
-    std::string codex = RunCodexCLI(path);
+    // Default to Claude; Codex kept for future toggle
+    std::string codex = RunClaudeCLI(path);
     client.setCodexResponse(codex);
     // Log full Codex response next to screenshot
     try {
