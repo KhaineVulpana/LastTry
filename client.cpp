@@ -599,14 +599,53 @@ public:
         static std::chrono::steady_clock::time_point middleDownTime;
         static POINT middlePos{0,0};
 
-        // Use low-order bit of GetAsyncKeyState so clicks aren't missed
-        if (GetAsyncKeyState(VK_RBUTTON) & 0x0001) {
-            sendMouseEvent("right");
+        static bool leftHeld = false;
+        static std::chrono::steady_clock::time_point leftDownTime;
+        static POINT leftPos{0,0};
+
+        static bool rightHeld = false;
+        static std::chrono::steady_clock::time_point rightDownTime;
+
+        auto now = std::chrono::steady_clock::now();
+
+        // LEFT BUTTON: long press -> send long_left:x,y (for trim anchor)
+        SHORT leftState = GetAsyncKeyState(VK_LBUTTON);
+        bool leftDown = (leftState & 0x8000) != 0;
+        if (leftDown && !leftHeld) {
+            leftHeld = true;
+            leftDownTime = now;
+            GetCursorPos(&leftPos);
+        }
+        if (!leftDown && leftHeld) {
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - leftDownTime).count();
+            if (duration > 800) {
+                std::ostringstream ss;
+                ss << "long_left:" << leftPos.x << "," << leftPos.y;
+                sendMouseEvent(ss.str());
+            }
+            leftHeld = false;
         }
 
+        // RIGHT BUTTON: short click -> right (screenshot), long press -> long_right (toggle view)
+        SHORT rightState = GetAsyncKeyState(VK_RBUTTON);
+        bool rightDown = (rightState & 0x8000) != 0;
+        if (rightDown && !rightHeld) {
+            rightHeld = true;
+            rightDownTime = now;
+        }
+        if (!rightDown && rightHeld) {
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - rightDownTime).count();
+            if (duration > 800) {
+                sendMouseEvent("long_right");
+            } else {
+                sendMouseEvent("right");
+            }
+            rightHeld = false;
+        }
+
+        // MIDDLE BUTTON: keep legacy behavior (anchor short / long_middle)
         SHORT midState = GetAsyncKeyState(VK_MBUTTON);
         bool midDown = (midState & 0x8000) != 0;
-        auto now = std::chrono::steady_clock::now();
         if (midDown && !middleHeld) {
             middleHeld = true;
             middleDownTime = now;
