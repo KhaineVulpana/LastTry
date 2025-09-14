@@ -1137,45 +1137,36 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 RECT drawRect = {destL, destT, destL + textW, destT + textH};
                 DrawTextA(hdcBuffer, toDraw, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-                // When split mode is active, trim the remote bitmap so that the resulting
-                // aspect ratio is the inverse of the original. We crop equally from the
-                // sides (or top/bottom if the source is portrait) to accomplish this.
+                // When split mode is active, crop the remote bitmap so the right panel is
+                // completely filled without letterboxing. We center-crop the source to the
+                // aspect ratio of the destination area.
                 int srcW = bm.bmWidth;
                 int srcH = bm.bmHeight;
                 int srcX = 0;
                 int srcY = 0;
-                if (srcW >= srcH) {
-                    int targetW = static_cast<int>((static_cast<double>(srcH) * srcH) / srcW);
+
+                int viewW = rightArea.right - rightArea.left;
+                int viewH = rightArea.bottom - rightArea.top;
+                double srcAspect = static_cast<double>(srcW) / srcH;
+                double areaAspect = static_cast<double>(viewW) / viewH;
+
+                if (srcAspect > areaAspect) {
+                    int targetW = static_cast<int>(srcH * areaAspect);
                     srcX = (srcW - targetW) / 2;
                     srcW = targetW;
-                } else {
-                    int targetH = static_cast<int>((static_cast<double>(srcW) * srcW) / srcH);
+                } else if (srcAspect < areaAspect) {
+                    int targetH = static_cast<int>(srcW / areaAspect);
                     srcY = (srcH - targetH) / 2;
                     srcH = targetH;
                 }
 
-                double croppedAspect = static_cast<double>(srcW) / srcH;
-                double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
-                                    (rightArea.bottom - rightArea.top);
-
-                int destWidth = rightArea.right - rightArea.left;
-                int destHeight = rightArea.bottom - rightArea.top;
+                int destWidth = viewW;
+                int destHeight = viewH;
                 int destX = rightArea.left;
                 int destY = rightArea.top;
 
-                if (areaAspect > croppedAspect) {
-                    destWidth = static_cast<int>(destHeight * croppedAspect);
-                    destX = rightArea.left + ((rightArea.right - rightArea.left - destWidth) / 2);
-                } else {
-                    destHeight = static_cast<int>(destWidth / croppedAspect);
-                    destY = rightArea.top + ((rightArea.bottom - rightArea.top - destHeight) / 2);
-                }
-
-                int topGap = destY;
-                int bottomGap = rightArea.bottom - destY - destHeight;
-
                 // Screenshot area sits below the codex text area
-                RECT leftRect = {0, topGap + reservedTextHeight + 8, leftWidth, clientRect.bottom - bottomGap};
+                RECT leftRect = {0, reservedTextHeight + 8, leftWidth, clientRect.bottom};
                 if (hdcShot) {
                     BITMAP sbm;
                     GetObject(data->screenshot_bitmap, sizeof(sbm), &sbm);
@@ -1197,16 +1188,6 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
 
                 StretchBlt(hdcBuffer, destX, destY, destWidth, destHeight,
                           hdcMem, srcX, srcY, srcW, srcH, SRCCOPY);
-
-                // Extend aspect-ratio bars across entire window
-                if (topGap > 0) {
-                    RECT topBar = {0, 0, clientRect.right, topGap};
-                    FillRect(hdcBuffer, &topBar, (HBRUSH)GetStockObject(BLACK_BRUSH));
-                }
-                if (bottomGap > 0) {
-                    RECT bottomBar = {0, clientRect.bottom - bottomGap, clientRect.right, clientRect.bottom};
-                    FillRect(hdcBuffer, &bottomBar, (HBRUSH)GetStockObject(BLACK_BRUSH));
-                }
 
                 // Codex text already rendered above (centered)
             } else {
