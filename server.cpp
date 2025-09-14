@@ -1116,14 +1116,14 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     codexText = client->getCodexResponse();
                 }
 
+                // Ensure consistent text rendering
+                int oldBkMode = SetBkMode(hdcBuffer, TRANSPARENT);
+                COLORREF oldColor = SetTextColor(hdcBuffer, RGB(0, 0, 0));
+
                 // Draw Codex text block
-                if (!codexText.empty()) {
-                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                } else {
-                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                }
+                const char* fallbackMsg = "Codex response pending...";
+                const char* toDraw = codexText.empty() ? fallbackMsg : codexText.c_str();
+                DrawTextA(hdcBuffer, toDraw, -1, &codexTextRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
                 // Debug info area below Codex text
                 RECT debugRect = {leftPanelRect.left + 8, codexTextRect.bottom + 8,
@@ -1138,11 +1138,19 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     debugText += "\n";
                     auto cx = clientDbg->getCodexResponse();
                     debugText += "codex_len: " + std::to_string(cx.size()) + "\n";
+                    // Include a short preview to verify visibility
+                    std::string preview = cx.substr(0, 128);
+                    for (char& ch : preview) { if (ch == '\r') ch = ' '; }
+                    debugText += "codex_preview: " + preview + "\n";
                 } else {
                     debugText += "client: not found\n";
                 }
                 DrawTextA(hdcBuffer, debugText.c_str(), -1, &debugRect,
                           DT_LEFT | DT_TOP | DT_WORDBREAK);
+
+                // Restore DC state
+                SetTextColor(hdcBuffer, oldColor);
+                SetBkMode(hdcBuffer, oldBkMode);
 
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
