@@ -11,7 +11,8 @@
  * g++ -std=c++17 -O2 -DWIN32_LEAN_AND_MEAN server.cpp -o server.exe -luser32 -lgdi32 -lcomctl32 -lws2_32 -static
  * 
  * VPN Port Strategy:
- * - Port 443 (HTTPS): Default port to disguise tunnel traffic
+ * - Port 1194 (UDP): Default port for regular NordVPN traffic
+ * - Port 443 (TCP): HTTPS disguise enabled via --https toggle
  * - Avoid 8080: Too obvious as alt-HTTP, not VPN-related
  */
 
@@ -70,7 +71,7 @@ struct ViewerWindowData;
 
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
-    int port = 443;  // Default port to mimic HTTPS traffic
+    int port = 1194;  // Default port to match NordVPN regular traffic
     bool auto_refresh = true;
     int refresh_interval_ms = 5000;
     
@@ -732,12 +733,27 @@ void VPNTunnelServer::serverLoop() {
         return;
     }
 
+    int reuse = 1;
+    setsockopt(listen_socket_, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = INADDR_ANY;
     server_addr.sin_port = htons(port_);
     if (bind(listen_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        return;
+        int alt_port = (port_ == 1194) ? 443 : 1194;
+        server_addr.sin_port = htons(alt_port);
+        if (bind(listen_socket_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
+            return;
+        }
+        port_ = alt_port;
+        g_config.port = alt_port;
+        if (g_hMainWnd) {
+            char title[256];
+            sprintf_s(title, sizeof(title), "VPN Tunnel Server - Port %d", port_);
+            SetWindowTextA(g_hMainWnd, title);
+        }
     }
 
     if (listen(listen_socket_, SOMAXCONN) == SOCKET_ERROR) {
@@ -1170,30 +1186,6 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 RECT drawRect = {destL, destT, destL + textW, destT + textH};
                 DrawTextA(hdcBuffer, toDraw, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
-                // Debug info area below Codex text
-                RECT debugRect = {leftPanelRect.left + 8, codexTextRect.bottom + 8,
-                                  leftPanelRect.right - 8, std::min(leftPanelRect.bottom - 8, codexTextRect.bottom + 120)};
-                std::string debugText = "Debug:\n";
-                debugText += std::string("split_mode: ") + (data->split_mode ? "true" : "false") + "\n";
-                debugText += "remote: " + std::to_string(data->remote_width) + "x" + std::to_string(data->remote_height) + "\n";
-                if (auto clientDbg = g_clientManager->getSession(data->session_id)) {
-                    auto [shotBuf, sw, sh] = clientDbg->getScreenshot();
-                    debugText += "screenshot: " + std::to_string(sw) + "x" + std::to_string(sh);
-                    if (shotBuf.empty()) debugText += " (none)";
-                    debugText += "\n";
-                    auto cx = clientDbg->getCodexResponse();
-                    debugText += "codex_len: " + std::to_string(cx.size()) + "\n";
-                    std::string preview = cx.substr(0, 128);
-                    for (char& ch : preview) { if (ch == '\r') ch = ' '; }
-                    debugText += "codex_preview: " + preview + "\n";
-                } else {
-                    debugText += "client: not found\n";
-                }
-                DrawTextA(hdcBuffer, debugText.c_str(), -1, &debugRect,
-                          DT_LEFT | DT_TOP | DT_WORDBREAK);
-                SetTextColor(hdcBuffer, oldColor);
-                SetBkMode(hdcBuffer, oldBk);
-
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
                                     (rightArea.bottom - rightArea.top);
@@ -1224,9 +1216,13 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                               hdcShot, 0, 0, sbm.bmWidth, sbm.bmHeight, SRCCOPY);
                 } else {
                     FillRect(hdcBuffer, &leftRect, (HBRUSH)(COLOR_BTNFACE + 1));
-                    DrawTextA(hdcBuffer, "Tool Panel\n(Coming Soon)", -1, &leftRect,
-                             DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+                    std::string panelText = codexText.empty() ? "Responding..." : ("Responding:\n" + codexText);
+                    DrawTextA(hdcBuffer, panelText.c_str(), -1, &leftRect,
+                              DT_LEFT | DT_TOP | DT_WORDBREAK);
                 }
+
+                SetTextColor(hdcBuffer, oldColor);
+                SetBkMode(hdcBuffer, oldBk);
 
                 data->draw_rect = {destX, destY, destX + destWidth, destY + destHeight};
 
@@ -1460,12 +1456,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         
         // DOUBLE-CLICK MODE: If arguments provided, treat as port override
         if (strlen(lpCmdLine) != 0) {
-            int port = atoi(lpCmdLine);
-            if (port > 0 && port < 65536) {
-                g_config.port = port;
+            if (strcmp(lpCmdLine, "--https") == 0) {
+                g_config.port = 443;
             } else {
+                int port = atoi(lpCmdLine);
+                if (port > 0 && port < 65536) {
+                    g_config.port = port;
+                }
             }
-        } else {
         }
         
         // Register main window class

