@@ -595,9 +595,7 @@ public:
     }
 
     void detectAndSendMouseEvents() {
-        static bool middleHeld = false;
-        static std::chrono::steady_clock::time_point middleDownTime;
-        static POINT middlePos{0,0};
+        // middle click handling removed
 
         static bool leftHeld = false;
         static std::chrono::steady_clock::time_point leftDownTime;
@@ -643,25 +641,7 @@ public:
             rightHeld = false;
         }
 
-        // MIDDLE BUTTON: keep legacy behavior (anchor short / long_middle)
-        SHORT midState = GetAsyncKeyState(VK_MBUTTON);
-        bool midDown = (midState & 0x8000) != 0;
-        if (midDown && !middleHeld) {
-            middleHeld = true;
-            middleDownTime = now;
-            GetCursorPos(&middlePos);
-        }
-        if (!midDown && middleHeld) {
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - middleDownTime).count();
-            if (duration > 800) {
-                sendMouseEvent("long_middle");
-            } else {
-                std::ostringstream ss;
-                ss << "middle:" << middlePos.x << "," << middlePos.y;
-                sendMouseEvent(ss.str());
-            }
-            middleHeld = false;
-        }
+        // no middle-button behavior
     }
     
     void run() {

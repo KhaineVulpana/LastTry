@@ -826,12 +826,8 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             std::string evt = payload.substr(p + 1);
             auto c = g_clientManager->getSession(session_id);
             if (!c) continue;
-            if (evt.rfind("middle:", 0) == 0) {
-                int x = 0, y = 0;
-                if (sscanf(evt.c_str() + 7, "%d,%d", &x, &y) == 2) {
-                    c->anchor_x = x;
-                    c->anchor_y = y;
-                }
+            if (false) {
+                // middle-click handling removed
             } else if (evt.rfind("long_left:", 0) == 0) {
                 int x = 0, y = 0;
                 if (sscanf(evt.c_str() + 10, "%d,%d", &x, &y) == 2) {
@@ -842,8 +838,8 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                 SaveClientRegionScreenshot(*c);
             } else if (evt == "long_right") {
                 ToggleSplitScreen(*c);
-            } else if (evt == "long_middle") {
-                // No-op: split mode is only enabled on middle click
+            } else if (false) {
+                // long_middle removed
             }
         } else {
         }
