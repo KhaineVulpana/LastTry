@@ -900,16 +900,17 @@ HBITMAP CreateScreenBitmap(const std::vector<uint8_t>& screen_data,
                            int& width, int& height) {
     if (screen_data.empty() || width == 0 || height == 0) return nullptr;
 
-    // Use the incoming frame dimensions as-is; split-mode cropping will handle
-    // any aspect-ratio adjustments at render time.
+
     const std::vector<uint8_t>& data = screen_data;
+
 
     HDC hdc = GetDC(nullptr);
 
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
     bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHe
+                     ader.biHeight = -height;
     bmi.bmiHeader.biPlanes = 1;
     bmi.bmiHeader.biBitCount = 24;
     bmi.bmiHeader.biCompression = BI_RGB;
