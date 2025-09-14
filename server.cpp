@@ -66,6 +66,7 @@ struct ViewerWindowData;
 #define WM_UPDATE_CLIENT_LIST (WM_USER + 1)
 #define WM_NEW_SCREEN_DATA (WM_USER + 2)
 #define WM_NEW_SCREENSHOT (WM_USER + 3)
+#define WM_ENABLE_SPLIT    (WM_USER + 4)
 
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
@@ -417,6 +418,8 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     std::string codex = RunCodexCLI(path);
     client.setCodexResponse(codex);
     if (client.viewer_window && IsWindow(client.viewer_window)) {
+        // Ensure split mode is enabled so Codex text is visible
+        PostMessage(client.viewer_window, WM_ENABLE_SPLIT, 0, 0);
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
 }
@@ -985,6 +988,13 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     ViewerWindowData* data = (ViewerWindowData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     
     switch (uMsg) {
+    case WM_ENABLE_SPLIT: {
+        if (data) {
+            data->split_mode = true;
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+    }
     case WM_CREATE: {
         CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
         data = (ViewerWindowData*)cs->lpCreateParams;
