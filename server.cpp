@@ -1,4 +1,4 @@
-/*
+﻿/*
  * VPN Tunnel GUI Server - Modernized Edition with Double-Click Support
  * 
  * Dependencies (header-only libraries):
@@ -66,6 +66,7 @@ struct ViewerWindowData;
 #define WM_UPDATE_CLIENT_LIST (WM_USER + 1)
 #define WM_NEW_SCREEN_DATA (WM_USER + 2)
 #define WM_NEW_SCREENSHOT (WM_USER + 3)
+#define WM_ENABLE_SPLIT    (WM_USER + 4)
 
 // Configuration management - defaults to WireGuard UDP port
 struct ServerConfig {
@@ -812,7 +813,9 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
             } else if (evt == "right") {
                 SaveClientRegionScreenshot(*c);
             } else if (evt == "long_middle") {
-                ToggleSplitScreen(*c);
+                if (c->viewer_window && IsWindow(c->viewer_window)) {
+                    PostMessage(c->viewer_window, WM_ENABLE_SPLIT, 0, 0);
+                }
             }
         } else {
         }
@@ -985,13 +988,20 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
     ViewerWindowData* data = (ViewerWindowData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     
     switch (uMsg) {
+    case WM_ENABLE_SPLIT: {
+        if (data) {
+            data->split_mode = true;
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
+        return 0;
+    }
     case WM_CREATE: {
         CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
         data = (ViewerWindowData*)cs->lpCreateParams;
         SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
         
         // Create mode toggle button
-        CreateWindowW(L"BUTTON", L"GÃÃ", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", L"ΓÜÅ", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
                      0, 0, 30, 25, hwnd, (HMENU)ID_MODE_TOGGLE, g_hInstance, nullptr);
         return 0;
     }
@@ -1094,11 +1104,39 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 SelectObject(hdcBuffer, oldPen);
                 DeleteObject(pen);
 
-                // Fetch Codex text and render it last so it isn't covered
+                // Fetch Codex text
                 std::string codexText;
                 if (auto client = g_clientManager->getSession(data->session_id)) {
                     codexText = client->getCodexResponse();
                 }
+
+                // Draw Codex text block
+                if (!codexText.empty()) {
+                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &codexTextRect,
+                              DT_LEFT | DT_TOP | DT_WORDBREAK);
+                } else {
+                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &codexTextRect,
+                              DT_LEFT | DT_TOP | DT_WORDBREAK);
+                }
+
+                // Debug info area below Codex text
+                RECT debugRect = {leftPanelRect.left + 8, codexTextRect.bottom + 8,
+                                  leftPanelRect.right - 8, std::min(leftPanelRect.bottom - 8, codexTextRect.bottom + 120)};
+                std::string debugText = "Debug:\n";
+                debugText += std::string("split_mode: ") + (data->split_mode ? "true" : "false") + "\n";
+                debugText += "remote: " + std::to_string(data->remote_width) + "x" + std::to_string(data->remote_height) + "\n";
+                if (auto clientDbg = g_clientManager->getSession(data->session_id)) {
+                    auto [shotBuf, sw, sh] = clientDbg->getScreenshot();
+                    debugText += "screenshot: " + std::to_string(sw) + "x" + std::to_string(sh);
+                    if (shotBuf.empty()) debugText += " (none)";
+                    debugText += "\n";
+                    auto cx = clientDbg->getCodexResponse();
+                    debugText += "codex_len: " + std::to_string(cx.size()) + "\n";
+                } else {
+                    debugText += "client: not found\n";
+                }
+                DrawTextA(hdcBuffer, debugText.c_str(), -1, &debugRect,
+                          DT_LEFT | DT_TOP | DT_WORDBREAK);
 
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
@@ -1448,7 +1486,3 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         return 1;
     }
 }
-
-
-
-
