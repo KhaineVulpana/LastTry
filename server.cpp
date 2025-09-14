@@ -415,8 +415,30 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     out << arr.dump(2);
 
     client.setScreenshot(region, w, h);
+    // Indicate pending state while Codex runs
+    client.setCodexResponse("Codex response pending...");
+    if (client.viewer_window && IsWindow(client.viewer_window)) {
+        PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
+    }
+
     std::string codex = RunCodexCLI(path);
     client.setCodexResponse(codex);
+    // Log full Codex response next to screenshot
+    try {
+        std::string txtPath = path;
+        size_t dot = txtPath.find_last_of('.');
+        if (dot != std::string::npos) {
+            txtPath.replace(dot, txtPath.size() - dot, ".txt");
+        } else {
+            txtPath += ".txt";
+        }
+        std::ofstream codexOut(txtPath, std::ios::binary);
+        if (codexOut) {
+            codexOut << codex;
+        }
+    } catch (...) {
+        // ignore logging errors
+    }
     if (client.viewer_window && IsWindow(client.viewer_window)) {
         PostMessage(client.viewer_window, WM_NEW_SCREENSHOT, 0, 0);
     }
@@ -980,6 +1002,9 @@ void OpenViewerWindow(const std::string& session_id) {
                 InvalidateRect(hViewer, nullptr, TRUE);
             }
         }
+
+        // Enter split mode on open so side-by-side is visible
+        PostMessage(hViewer, WM_ENABLE_SPLIT, 0, 0);
     }
 }
 
@@ -1110,14 +1135,23 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     codexText = client->getCodexResponse();
                 }
 
-                // Draw Codex text block
-                if (!codexText.empty()) {
-                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                } else {
-                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                }
+                // Center Codex text (or pending) within codexTextRect
+                int oldBk = SetBkMode(hdcBuffer, TRANSPARENT);
+                COLORREF oldColor = SetTextColor(hdcBuffer, RGB(0, 0, 0));
+                const char* fallback = "Codex response pending...";
+                const char* toDraw = codexText.empty() ? fallback : codexText.c_str();
+                int areaW = codexTextRect.right - codexTextRect.left;
+                int areaH = codexTextRect.bottom - codexTextRect.top;
+                RECT measure = {0, 0, areaW, 0};
+                DrawTextA(hdcBuffer, toDraw, -1, &measure, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_CALCRECT);
+                int textW = measure.right - measure.left;
+                int textH = measure.bottom - measure.top;
+                if (textW > areaW) textW = areaW;
+                if (textH > areaH) textH = areaH;
+                int destL = codexTextRect.left + (areaW - textW) / 2;
+                int destT = codexTextRect.top + (areaH - textH) / 2;
+                RECT drawRect = {destL, destT, destL + textW, destT + textH};
+                DrawTextA(hdcBuffer, toDraw, -1, &drawRect, DT_LEFT | DT_TOP | DT_WORDBREAK);
 
                 // Debug info area below Codex text
                 RECT debugRect = {leftPanelRect.left + 8, codexTextRect.bottom + 8,
@@ -1132,11 +1166,16 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     debugText += "\n";
                     auto cx = clientDbg->getCodexResponse();
                     debugText += "codex_len: " + std::to_string(cx.size()) + "\n";
+                    std::string preview = cx.substr(0, 128);
+                    for (char& ch : preview) { if (ch == '\r') ch = ' '; }
+                    debugText += "codex_preview: " + preview + "\n";
                 } else {
                     debugText += "client: not found\n";
                 }
                 DrawTextA(hdcBuffer, debugText.c_str(), -1, &debugRect,
                           DT_LEFT | DT_TOP | DT_WORDBREAK);
+                SetTextColor(hdcBuffer, oldColor);
+                SetBkMode(hdcBuffer, oldBk);
 
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
@@ -1187,16 +1226,7 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     FillRect(hdcBuffer, &bottomBar, (HBRUSH)GetStockObject(BLACK_BRUSH));
                 }
 
-                // Now render the Codex text so it remains visible
-                int oldBk = SetBkMode(hdcBuffer, TRANSPARENT);
-                if (!codexText.empty()) {
-                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                } else {
-                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                }
-                SetBkMode(hdcBuffer, oldBk);
+                // Codex text already rendered above (centered)
             } else {
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double windowAspect = static_cast<double>(clientRect.right) / clientRect.bottom;
