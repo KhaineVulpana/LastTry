@@ -991,7 +991,7 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
         
         // Create mode toggle button
-        CreateWindowW(L"BUTTON", L"‚öè", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+        CreateWindowW(L"BUTTON", L"G‹≈", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
                      0, 0, 30, 25, hwnd, (HMENU)ID_MODE_TOGGLE, g_hInstance, nullptr);
         return 0;
     }
