@@ -1082,7 +1082,7 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 FillRect(hdcBuffer, &leftPanelRect, (HBRUSH)(COLOR_BTNFACE + 1));
 
                 // Reserve a top area in the left panel for Codex text
-                int reservedTextHeight = min(200, max(80, clientRect.bottom / 4));
+                int reservedTextHeight = std::min(200, std::max(80, static_cast<int>(clientRect.bottom) / 4));
                 RECT codexTextRect = {leftPanelRect.left + 8, leftPanelRect.top + 8,
                                       leftPanelRect.right - 8, leftPanelRect.top + reservedTextHeight};
 
