@@ -428,7 +428,7 @@ static void SaveClientRegionScreenshot(ClientSession& client) {
     }
 }
 
-// ToggleSplitScreen declaration removed; use WM_ENABLE_SPLIT messaging instead
+static void ToggleSplitScreen(ClientSession& client);
 
 struct WireGuardHeader {
     BYTE type;
@@ -850,7 +850,20 @@ struct ViewerWindowData {
     RECT draw_rect; // area where remote screen is rendered
 };
 
-// ToggleSplitScreen removed; split mode is controlled via WM_ENABLE_SPLIT
+static void ToggleSplitScreen(ClientSession& client) {
+    if (client.viewer_window && IsWindow(client.viewer_window)) {
+        ViewerWindowData* data = (ViewerWindowData*)GetWindowLongPtr(client.viewer_window, GWLP_USERDATA);
+        if (data) {
+            data->split_mode = !data->split_mode;
+            if (!data->split_mode) {
+                int screenW = GetSystemMetrics(SM_CXSCREEN);
+                int screenH = GetSystemMetrics(SM_CYSCREEN);
+                SetWindowPos(client.viewer_window, HWND_TOPMOST, 0, 0, screenW, screenH, SWP_SHOWWINDOW);
+            }
+            InvalidateRect(client.viewer_window, nullptr, TRUE);
+        }
+    }
+}
 
 // Modern GUI helper functions
 void UpdateClientList() {
@@ -869,31 +882,17 @@ void UpdateClientList() {
         item.pszText = const_cast<char*>(client->client_ip.c_str());
         item.lParam = reinterpret_cast<LPARAM>(client.get());
         
-        int itemIndex = (int)SendMessageA(g_hClientList, LVM_INSERTITEMA, 0, (LPARAM)&item);
+        int itemIndex = ListView_InsertItem(g_hClientList, &item);
         
-        {
-            LVITEMA sub = {0};
-            sub.iSubItem = 1;
-            sub.pszText = const_cast<LPSTR>(client->id.c_str());
-            SendMessageA(g_hClientList, LVM_SETITEMTEXTA, itemIndex, (LPARAM)&sub);
-        }
+        ListView_SetItemText(g_hClientList, itemIndex, 1, const_cast<LPSTR>(client->id.c_str()));
         
         auto [screen_data, width, height] = client->getScreenData();
         char resolution[32];
         sprintf_s(resolution, sizeof(resolution), "%dx%d", width, height);
-        {
-            LVITEMA sub = {0};
-            sub.iSubItem = 2;
-            sub.pszText = resolution;
-            SendMessageA(g_hClientList, LVM_SETITEMTEXTA, itemIndex, (LPARAM)&sub);
-        }
+        ListView_SetItemText(g_hClientList, itemIndex, 2, resolution);
         
-        {
-            LVITEMA sub = {0};
-            sub.iSubItem = 3;
-            sub.pszText = client->is_connected ? (LPSTR)"Connected" : (LPSTR)"Idle";
-            SendMessageA(g_hClientList, LVM_SETITEMTEXTA, itemIndex, (LPARAM)&sub);
-        }
+        ListView_SetItemText(g_hClientList, itemIndex, 3,
+                             client->is_connected ? (LPSTR)"Connected" : (LPSTR)"Idle");
     }
 }
 
@@ -1339,22 +1338,22 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         col.pszText = (LPSTR)"Client IP";
         col.cx = 120;
         col.iSubItem = 0;
-        SendMessageA(g_hClientList, LVM_INSERTCOLUMNA, 0, (LPARAM)&col);
+        ListView_InsertColumn(g_hClientList, 0, &col);
 
         col.pszText = (LPSTR)"Session ID";
         col.cx = 140;
         col.iSubItem = 1;
-        SendMessageA(g_hClientList, LVM_INSERTCOLUMNA, 1, (LPARAM)&col);
+        ListView_InsertColumn(g_hClientList, 1, &col);
 
         col.pszText = (LPSTR)"Resolution";
         col.cx = 100;
         col.iSubItem = 2;
-        SendMessageA(g_hClientList, LVM_INSERTCOLUMNA, 2, (LPARAM)&col);
+        ListView_InsertColumn(g_hClientList, 2, &col);
 
         col.pszText = (LPSTR)"Status";
         col.cx = 80;
         col.iSubItem = 3;
-        SendMessageA(g_hClientList, LVM_INSERTCOLUMNA, 3, (LPARAM)&col);
+        ListView_InsertColumn(g_hClientList, 3, &col);
         
         // Enable full row select
         ListView_SetExtendedListViewStyle(g_hClientList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
@@ -1401,12 +1400,8 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         if (pnmh->idFrom == ID_CLIENT_LIST && pnmh->code == NM_DBLCLK) {
             int selected = ListView_GetNextItem(g_hClientList, -1, LVNI_SELECTED);
             if (selected != -1) {
-                char session_id[64] = {0};
-                LVITEMA li = {0};
-                li.iSubItem = 1;
-                li.pszText = session_id;
-                li.cchTextMax = (int)sizeof(session_id);
-                SendMessageA(g_hClientList, LVM_GETITEMTEXTA, selected, (LPARAM)&li);
+                char session_id[64];
+                ListView_GetItemText(g_hClientList, selected, 1, session_id, sizeof(session_id));
                 OpenViewerWindow(std::string(session_id));
             }
         }
