@@ -364,7 +364,7 @@ static std::string RunCodexCLI(const std::string& filename) {
     }
     _pclose(pipe);
     // Trim trailing whitespace
-    while (!result.empty() && (result.back() == '\\n' || result.back() == '\\r' || result.back() == ' ')) {
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' ')) {
         result.pop_back();
     }
     if (result.empty()) {
@@ -1074,23 +1074,30 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
             GetObject(data->screen_bitmap, sizeof(bm), &bm);
 
             if (data->split_mode) {
-                // Split screen: left 40% tool panel / screenshot, right 60% remote view
+                // Split screen: left 40% tool panel (codex text + screenshot), right 60% remote view
                 FillRect(hdcBuffer, &clientRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
                 int leftWidth = clientRect.right * 40 / 100;
                 RECT rightArea = {leftWidth, 0, clientRect.right, clientRect.bottom};
                 RECT leftPanelRect = {0, 0, leftWidth, clientRect.bottom};
                 FillRect(hdcBuffer, &leftPanelRect, (HBRUSH)(COLOR_BTNFACE + 1));
 
+                // Reserve a top area in the left panel for Codex text
+                int reservedTextHeight = min(200, max(80, clientRect.bottom / 4));
+                RECT codexTextRect = {leftPanelRect.left + 8, leftPanelRect.top + 8,
+                                      leftPanelRect.right - 8, leftPanelRect.top + reservedTextHeight};
+
+                // Draw a subtle separator line under the codex text area
+                HPEN pen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+                HGDIOBJ oldPen = SelectObject(hdcBuffer, pen);
+                MoveToEx(hdcBuffer, leftPanelRect.left, codexTextRect.bottom + 4, nullptr);
+                LineTo(hdcBuffer, leftPanelRect.right, codexTextRect.bottom + 4);
+                SelectObject(hdcBuffer, oldPen);
+                DeleteObject(pen);
+
+                // Fetch Codex text and render it last so it isn't covered
                 std::string codexText;
                 if (auto client = g_clientManager->getSession(data->session_id)) {
                     codexText = client->getCodexResponse();
-                }
-                if (!codexText.empty()) {
-                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &leftPanelRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                } else {
-                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &leftPanelRect,
-                              DT_CENTER | DT_VCENTER | DT_WORDBREAK);
                 }
 
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
@@ -1112,7 +1119,8 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 int topGap = destY;
                 int bottomGap = rightArea.bottom - destY - destHeight;
 
-                RECT leftRect = {0, topGap, leftWidth, clientRect.bottom - bottomGap};
+                // Screenshot area sits below the codex text area
+                RECT leftRect = {0, topGap + reservedTextHeight + 8, leftWidth, clientRect.bottom - bottomGap};
                 if (hdcShot) {
                     BITMAP sbm;
                     GetObject(data->screenshot_bitmap, sizeof(sbm), &sbm);
@@ -1140,6 +1148,17 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                     RECT bottomBar = {0, clientRect.bottom - bottomGap, clientRect.right, clientRect.bottom};
                     FillRect(hdcBuffer, &bottomBar, (HBRUSH)GetStockObject(BLACK_BRUSH));
                 }
+
+                // Now render the Codex text so it remains visible
+                int oldBk = SetBkMode(hdcBuffer, TRANSPARENT);
+                if (!codexText.empty()) {
+                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &codexTextRect,
+                              DT_LEFT | DT_TOP | DT_WORDBREAK);
+                } else {
+                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &codexTextRect,
+                              DT_LEFT | DT_TOP | DT_WORDBREAK);
+                }
+                SetBkMode(hdcBuffer, oldBk);
             } else {
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double windowAspect = static_cast<double>(clientRect.right) / clientRect.bottom;
@@ -1196,6 +1215,11 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
         return 0;
 
     case WM_RBUTTONDOWN:
+        if (data) {
+            if (auto client = g_clientManager->getSession(data->session_id)) {
+                SaveClientRegionScreenshot(*client);
+            }
+        }
         return 0;
 
     case WM_CHAR:
