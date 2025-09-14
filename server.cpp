@@ -1104,39 +1104,11 @@ LRESULT CALLBACK ViewerWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lP
                 SelectObject(hdcBuffer, oldPen);
                 DeleteObject(pen);
 
-                // Fetch Codex text
+                // Fetch Codex text and render it last so it isn't covered
                 std::string codexText;
                 if (auto client = g_clientManager->getSession(data->session_id)) {
                     codexText = client->getCodexResponse();
                 }
-
-                // Draw Codex text block
-                if (!codexText.empty()) {
-                    DrawTextA(hdcBuffer, codexText.c_str(), -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                } else {
-                    DrawTextA(hdcBuffer, "Codex response pending...", -1, &codexTextRect,
-                              DT_LEFT | DT_TOP | DT_WORDBREAK);
-                }
-
-                // Debug info area below Codex text
-                RECT debugRect = {leftPanelRect.left + 8, codexTextRect.bottom + 8,
-                                  leftPanelRect.right - 8, std::min(leftPanelRect.bottom - 8, codexTextRect.bottom + 120)};
-                std::string debugText = "Debug:\n";
-                debugText += std::string("split_mode: ") + (data->split_mode ? "true" : "false") + "\n";
-                debugText += "remote: " + std::to_string(data->remote_width) + "x" + std::to_string(data->remote_height) + "\n";
-                if (auto clientDbg = g_clientManager->getSession(data->session_id)) {
-                    auto [shotBuf, sw, sh] = clientDbg->getScreenshot();
-                    debugText += "screenshot: " + std::to_string(sw) + "x" + std::to_string(sh);
-                    if (shotBuf.empty()) debugText += " (none)";
-                    debugText += "\n";
-                    auto cx = clientDbg->getCodexResponse();
-                    debugText += "codex_len: " + std::to_string(cx.size()) + "\n";
-                } else {
-                    debugText += "client: not found\n";
-                }
-                DrawTextA(hdcBuffer, debugText.c_str(), -1, &debugRect,
-                          DT_LEFT | DT_TOP | DT_WORDBREAK);
 
                 double remoteAspect = static_cast<double>(bm.bmWidth) / bm.bmHeight;
                 double areaAspect = static_cast<double>(rightArea.right - rightArea.left) /
