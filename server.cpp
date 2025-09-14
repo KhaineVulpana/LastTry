@@ -832,12 +832,13 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
                     c->anchor_x = x;
                     c->anchor_y = y;
                 }
-            } else if (evt == "right") {
-                SaveClientRegionScreenshot(*c);
-            } else if (evt == "long_middle") {
                 if (c->viewer_window && IsWindow(c->viewer_window)) {
                     PostMessage(c->viewer_window, WM_ENABLE_SPLIT, 0, 0);
                 }
+            } else if (evt == "right") {
+                SaveClientRegionScreenshot(*c);
+            } else if (evt == "long_middle") {
+                // No-op: split mode is only enabled on middle click
             }
         } else {
         }
