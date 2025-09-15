@@ -103,21 +103,37 @@ static std::string PromptServerIP(const std::string& def) {
     g_ip_default = def;
     g_ip_result.clear();
 
+    HINSTANCE hInst = GetModuleHandle(NULL);
+    if (!hInst) {
+        MessageBox(NULL, L"GetModuleHandle failed", L"Error", MB_OK);
+        return def;
+    }
+
     WNDCLASSA wc{};
     wc.lpfnWndProc   = InputWndProc;
-    wc.hInstance     = GetModuleHandleA(nullptr);
+    wc.hInstance     = hInst;
     wc.lpszClassName = "IPInputClass";
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    RegisterClassA(&wc);
+    
+    if (!RegisterClassA(&wc)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_CLASS_ALREADY_EXISTS) {
+            MessageBoxA(NULL, ("RegisterClass failed: " + std::to_string(err)).c_str(), "Error", MB_OK);
+            return def;
+        }
+    }
 
+    HWND hwnd = CreateWindowExA(WS_EX_TOPMOST, "IPInputClass", "Server IP",
+                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                                100, 100, 300, 80, nullptr, nullptr, hInst, nullptr);
 
-    HWND hwnd = CreateWindowExA(
-        WS_EX_TOPMOST,
-        "IPInputClass", "Server IP",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 300, 80,
-        nullptr, nullptr, wc.hInstance, nullptr);
+    if (!hwnd) {
+        DWORD err = GetLastError();
+        MessageBoxA(NULL, ("CreateWindow failed: " + std::to_string(err)).c_str(), "Error", MB_OK);
+        UnregisterClassA("IPInputClass", hInst);
+        return def;
+    }
 
     if (!hwnd) {
         UnregisterClassA("IPInputClass", wc.hInstance);
@@ -139,6 +155,7 @@ static std::string PromptServerIP(const std::string& def) {
     if (g_ip_result.empty()) g_ip_result = def;
     return g_ip_result;
 }
+
 
 class ChaChaCompressor {
 public:
