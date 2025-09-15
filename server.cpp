@@ -48,7 +48,9 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+
 #include "chacha20.h"
+
 
 using json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -437,6 +439,7 @@ struct WireGuardPacket {
     BYTE auth_tag[16];
 
     WireGuardPacket(const std::vector<BYTE>& payload) {
+
         encrypted_payload = encryptData(payload, header.counter, header.nonce);
         for (int i = 0; i < 16; i++) {
             auth_tag[i] = rand() % 256;
