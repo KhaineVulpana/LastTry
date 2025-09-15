@@ -136,6 +136,7 @@ static std::string PromptServerIP(const std::string& def) {
     }
 
     ShowWindow(hwnd, SW_SHOWNORMAL);
+    Sleep(500);
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
 
@@ -366,7 +367,9 @@ public:
         
         HWND consoleWindow = GetConsoleWindow();
         if (consoleWindow) {
+            Sleep(500);
             ShowWindow(consoleWindow, SW_HIDE);
+            Sleep(500);
         }
     }
     
