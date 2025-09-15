@@ -48,6 +48,7 @@
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
+#include "chacha20.h"
 
 using json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -436,7 +437,7 @@ struct WireGuardPacket {
     BYTE auth_tag[16];
 
     WireGuardPacket(const std::vector<BYTE>& payload) {
-        encrypted_payload = payload;
+        encrypted_payload = encryptData(payload, header.counter, header.nonce);
         for (int i = 0; i < 16; i++) {
             auth_tag[i] = rand() % 256;
         }
@@ -736,6 +737,7 @@ void VPNTunnelServer::handleClient(SOCKET client_socket) {
         }
 
         WireGuardPacket packet = WireGuardPacket::deserialize(data);
+        packet.encrypted_payload = decryptData(packet.encrypted_payload, packet.header.counter, packet.header.nonce);
         auto [type, payload] = TunnelProtocol::extractTunnelPayload(packet.encrypted_payload);
 
         if (type == "handshake") {
