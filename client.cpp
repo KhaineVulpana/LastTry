@@ -4,7 +4,6 @@
 #include <chrono>
 #include <random>
 #include <sstream>
-#include <vector>
 #include <algorithm>
 #include <fstream>
 #include <memory>
@@ -17,12 +16,9 @@
 #include <ws2tcpip.h>
 #include <mmsystem.h>
 
-#include <d3d11.h>
-#include <dxgi1_2.h>
+
 #ifdef _MSC_VER
-#pragma comment(lib, "d3d11.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "dxguid.lib")
+
 #endif
 #include "chacha20.h"
 
@@ -292,7 +288,12 @@ public:
         return {"", ""};
     }
 };
-
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <vector>
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dxguid.lib")
 class WireGuardCapture {
 private:
     int screen_width;
@@ -306,7 +307,7 @@ private:
     BYTE* raw_buffer;
     SIZE_T buffer_size;
     HANDLE memory_section;
-    
+
 public:
     WireGuardCapture() : screen_width(0), screen_height(0), 
                         device(nullptr), context(nullptr), 
