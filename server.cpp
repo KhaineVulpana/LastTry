@@ -692,9 +692,9 @@ void VPNTunnelServer::serverLoop() {
         port_ = alt_port;
         g_config.port = alt_port;
         if (g_hMainWnd) {
-            char title[256];
-            sprintf_s(title, sizeof(title), "VPN Tunnel Server - Port %d", port_);
-            SetWindowTextA(g_hMainWnd, title);
+            wchar_t title[256];
+            swprintf(title, 256, L"VPN Tunnel Server - Port %d", port_);
+            SetWindowTextW(g_hMainWnd, title);
         }
     }
 
@@ -1338,7 +1338,7 @@ LRESULT CALLBACK MainWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         ListView_SetExtendedListViewStyle(g_hClientList, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
         
         // Set initial window title
-        SetWindowTextA(hwnd, "VPN Tunnel Server - Initializing...");
+        SetWindowTextW(hwnd, L"VPN Tunnel Server - Initializing...");
         
         // Start auto-refresh timer if enabled
         if (g_config.auto_refresh) {
@@ -1455,11 +1455,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
         
         // Create main window with port info in title
-        char windowTitle[256];
-        sprintf_s(windowTitle, sizeof(windowTitle), "VPN Tunnel Server - Port %d", g_config.port);
-        
-        g_hMainWnd = CreateWindowA(
-            "VPNTunnelServer",
+        wchar_t windowTitle[256];
+        swprintf(windowTitle, 256, L"VPN Tunnel Server - Port %d", g_config.port);
+
+        g_hMainWnd = CreateWindowW(
+            WC_MAIN_WINDOW,
             windowTitle,
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT, CW_USEDEFAULT, 640, 400,
