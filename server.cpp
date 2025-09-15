@@ -310,7 +310,7 @@ static std::vector<uint8_t> EncodeJPEG(const std::vector<uint8_t>& data, int wid
 
 static std::string RunCodexCLI(const std::string& filename) {
     // Use non-interactive exec and attach the image; capture stderr
-    std::string command = "codex exec -i " + filename + " \"Complete this\"";
+    std::string command = "codex exec -i \"Solve the problem in the image, and respond with ONLY the solution code: "+filename+"\"" ;
     std::string result;
     FILE* pipe = _popen(command.c_str(), "r");
     if (!pipe) {

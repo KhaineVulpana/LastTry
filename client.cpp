@@ -111,6 +111,7 @@ static std::string PromptServerIP(const std::string& def) {
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassA(&wc);
 
+
     HWND hwnd = CreateWindowExA(
         WS_EX_TOPMOST,
         "IPInputClass", "Server IP",
@@ -126,6 +127,7 @@ static std::string PromptServerIP(const std::string& def) {
     ShowWindow(hwnd, SW_SHOWNORMAL);
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
+
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
