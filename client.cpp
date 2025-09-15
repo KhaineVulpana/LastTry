@@ -737,6 +737,10 @@ public:
 };
 
 int main(int argc, char* argv[]) {
+    // Hide and detach any console window so the client runs in the background
+    ShowWindow(GetConsoleWindow(), SW_HIDE);
+    FreeConsole();
+
     std::string host = "192.168.88.100";
     int port = 1194;
     bool hostProvided = false;
@@ -753,10 +757,8 @@ int main(int argc, char* argv[]) {
         }
     }
 
-
-    if (!hostProvided) {
-        host = PromptServerIP(host);
-    }
+    // Always prompt the user for the server IP, using any provided value as default
+    host = PromptServerIP(host);
 
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {

@@ -39,7 +39,7 @@ server: $(SERVER_EXE)
 
 $(CLIENT_EXE): $(CLIENT_SRC)
 	@echo "🔨 Building VPN client (nordvpn.exe)..."
-	$(CXX) $(CXXFLAGS) $(CLIENT_SRC) -o $(CLIENT_EXE) $(CLIENT_LIBS)
+	$(CXX) $(CXXFLAGS) -mwindows $(CLIENT_SRC) -o $(CLIENT_EXE) $(CLIENT_LIBS)
 	@echo "✅ Client built: $(CLIENT_EXE)"
 
 $(SERVER_EXE): $(SERVER_SRC)
