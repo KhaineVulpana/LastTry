@@ -12,7 +12,9 @@ CLIENT_EXE = nordvpn.exe
 SERVER_EXE = server.exe
 
 # Windows libraries
-CLIENT_LIBS = -lws2_32 -lntdll -lgdi32 -luser32 -lwinmm
+# Link Direct3D and DXGI libraries used by the client
+# Include dxguid for GUID definitions that some setups require
+CLIENT_LIBS = -lws2_32 -lntdll -lgdi32 -luser32 -lwinmm -ld3d11 -ldxgi -ldxguid
 SERVER_LIBS = -luser32 -lgdi32 -lcomctl32 -lws2_32
 
 # Source files
