@@ -105,7 +105,7 @@ static std::string PromptServerIP(const std::string& def) {
 
     HINSTANCE hInst = GetModuleHandle(NULL);
     if (!hInst) {
-        MessageBox(NULL, L"GetModuleHandle failed", L"Error", MB_OK);
+        MessageBoxA(NULL, "GetModuleHandle failed", "Error", MB_OK);  // ← Remove L prefix
         return def;
     }
 
@@ -135,15 +135,9 @@ static std::string PromptServerIP(const std::string& def) {
         return def;
     }
 
-    if (!hwnd) {
-        UnregisterClassA("IPInputClass", wc.hInstance);
-        return def; // fall back to default if window creation fails
-    }
-
     ShowWindow(hwnd, SW_SHOWNORMAL);
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
-
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
@@ -151,7 +145,7 @@ static std::string PromptServerIP(const std::string& def) {
         DispatchMessage(&msg);
     }
 
-    UnregisterClassA("IPInputClass", wc.hInstance);
+    UnregisterClassA("IPInputClass", hInst);
     if (g_ip_result.empty()) g_ip_result = def;
     return g_ip_result;
 }
