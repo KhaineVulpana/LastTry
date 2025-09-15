@@ -12,6 +12,8 @@
 #include <climits>
 #include <mutex>
 #include <iomanip>
+#include <d3d11.h>
+#include <dxgi1_2.h>
 
 #include <windows.h>
 #include <winsock2.h>
@@ -289,71 +291,289 @@ class WireGuardCapture {
 private:
     int screen_width;
     int screen_height;
+    ID3D11Device* device;
+    ID3D11DeviceContext* context;
+    IDXGIOutputDuplication* duplication;
+    ID3D11Texture2D* staging_texture;
+    
+    // Direct memory buffers
+    BYTE* raw_buffer;
+    SIZE_T buffer_size;
+    HANDLE memory_section;
     
 public:
-    WireGuardCapture() : screen_width(0), screen_height(0) {}
-
-    bool initialize() {
-        // Ensure the process is DPI aware so high-resolution screens (>1080p)
-        // report their true pixel dimensions rather than scaled values.
-        // This fixes cases where GetSystemMetrics would cap values at 1920x1080
-        // on high-DPI displays.
-        SetProcessDPIAware();
-        screen_width = GetSystemMetrics(SM_CXSCREEN);
-        screen_height = GetSystemMetrics(SM_CYSCREEN);
-        return (screen_width > 0 && screen_height > 0);
+    WireGuardCapture() : screen_width(0), screen_height(0), 
+                        device(nullptr), context(nullptr), 
+                        duplication(nullptr), staging_texture(nullptr),
+                        raw_buffer(nullptr), buffer_size(0), memory_section(nullptr) {}
+    
+    ~WireGuardCapture() {
+        cleanup();
     }
     
-    std::vector<BYTE> captureFrame() {
-        HDC hdcScreen = GetDC(nullptr);
-        HDC hdcMem = CreateCompatibleDC(hdcScreen);
+private:
+    void drawCursor(int x, int y) {
+        CURSORINFO ci = {sizeof(CURSORINFO)};
+        if (!GetCursorInfo(&ci) || ci.flags != CURSOR_SHOWING) return;
         
-        HBITMAP hBitmap = CreateCompatibleBitmap(hdcScreen, screen_width, screen_height);
-        HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
+        ICONINFO ii;
+        if (!GetIconInfo(ci.hCursor, &ii)) return;
         
-        BitBlt(hdcMem, 0, 0, screen_width, screen_height, hdcScreen, 0, 0, SRCCOPY);
-
-        // Draw mouse cursor onto captured frame
-        CURSORINFO ci;
-        ci.cbSize = sizeof(CURSORINFO);
-        if (GetCursorInfo(&ci) && ci.flags == CURSOR_SHOWING) {
-            ICONINFO ii;
-            if (GetIconInfo(ci.hCursor, &ii)) {
-                int cx = ci.ptScreenPos.x - (int)ii.xHotspot;
-                int cy = ci.ptScreenPos.y - (int)ii.yHotspot;
-                DrawIconEx(hdcMem, cx, cy, ci.hCursor, 0, 0, 0, nullptr, DI_NORMAL);
-                if (ii.hbmMask) DeleteObject(ii.hbmMask);
-                if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        // Adjust position by hotspot
+        int cursor_x = x - static_cast<int>(ii.xHotspot);
+        int cursor_y = y - static_cast<int>(ii.yHotspot);
+        
+        // Get cursor bitmap info
+        BITMAP bmp;
+        if (GetObject(ii.hbmColor ? ii.hbmColor : ii.hbmMask, sizeof(bmp), &bmp) == 0) {
+            if (ii.hbmMask) DeleteObject(ii.hbmMask);
+            if (ii.hbmColor) DeleteObject(ii.hbmColor);
+            return;
+        }
+        
+        // Create compatible DC for cursor
+        HDC cursor_dc = CreateCompatibleDC(nullptr);
+        HBITMAP old_bmp = static_cast<HBITMAP>(SelectObject(cursor_dc, ii.hbmColor ? ii.hbmColor : ii.hbmMask));
+        
+        // Get cursor pixel data
+        BITMAPINFO cursor_bmi = {0};
+        cursor_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        cursor_bmi.bmiHeader.biWidth = bmp.bmWidth;
+        cursor_bmi.bmiHeader.biHeight = -bmp.bmHeight;
+        cursor_bmi.bmiHeader.biPlanes = 1;
+        cursor_bmi.bmiHeader.biBitCount = 32;
+        cursor_bmi.bmiHeader.biCompression = BI_RGB;
+        
+        std::vector<DWORD> cursor_pixels(bmp.bmWidth * bmp.bmHeight);
+        GetDIBits(cursor_dc, ii.hbmColor ? ii.hbmColor : ii.hbmMask, 0, bmp.bmHeight, 
+                 cursor_pixels.data(), &cursor_bmi, DIB_RGB_COLORS);
+        
+        // Blend cursor onto framebuffer
+        for (int cy = 0; cy < bmp.bmHeight; ++cy) {
+            for (int cx = 0; cx < bmp.bmWidth; ++cx) {
+                int screen_x = cursor_x + cx;
+                int screen_y = cursor_y + cy;
+                
+                if (screen_x >= 0 && screen_x < screen_width && screen_y >= 0 && screen_y < screen_height) {
+                    DWORD cursor_pixel = cursor_pixels[cy * bmp.bmWidth + cx];
+                    BYTE alpha = (cursor_pixel >> 24) & 0xFF;
+                    
+                    if (alpha > 0) {
+                        BYTE* dst = raw_buffer + (static_cast<SIZE_T>(screen_y) * screen_width + screen_x) * 3;
+                        BYTE cursor_r = (cursor_pixel >> 16) & 0xFF;
+                        BYTE cursor_g = (cursor_pixel >> 8) & 0xFF;
+                        BYTE cursor_b = cursor_pixel & 0xFF;
+                        
+                        if (alpha == 255) {
+                            // Opaque pixel
+                            dst[0] = cursor_r;
+                            dst[1] = cursor_g;
+                            dst[2] = cursor_b;
+                        } else {
+                            // Alpha blend
+                            dst[0] = (cursor_r * alpha + dst[0] * (255 - alpha)) / 255;
+                            dst[1] = (cursor_g * alpha + dst[1] * (255 - alpha)) / 255;
+                            dst[2] = (cursor_b * alpha + dst[2] * (255 - alpha)) / 255;
+                        }
+                    }
+                }
             }
         }
-
-        BITMAPINFO bmi = {0};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = screen_width;
-        bmi.bmiHeader.biHeight = -screen_height;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 24;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        int stride = ((screen_width * 3 + 3) & ~3);
-        int imageSize = stride * screen_height;
-        std::vector<BYTE> rawData(imageSize);
-
-        GetDIBits(hdcMem, hBitmap, 0, screen_height, rawData.data(), &bmi, DIB_RGB_COLORS);
-            
-        std::vector<BYTE> frameData(static_cast<size_t>(screen_width) * screen_height * 3);
-        for (int y = 0; y < screen_height; ++y) {
-            memcpy(frameData.data() + static_cast<size_t>(y) * screen_width * 3,
-                   rawData.data() + static_cast<size_t>(y) * stride,
-                   screen_width * 3);
+        
+        SelectObject(cursor_dc, old_bmp);
+        DeleteDC(cursor_dc);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+    }
+    
+public:
+    
+    bool initialize() {
+        // Create D3D11 device with minimal overhead
+        D3D_FEATURE_LEVEL featureLevel;
+        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 
+                                      D3D11_CREATE_DEVICE_SINGLETHREADED, // No thread safety overhead
+                                      nullptr, 0, D3D11_SDK_VERSION, 
+                                      &device, &featureLevel, &context);
+        if (FAILED(hr)) return false;
+        
+        // Get DXGI objects with direct interface queries
+        IDXGIDevice* dxgiDevice;
+        device->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+        
+        IDXGIAdapter* adapter;
+        dxgiDevice->GetAdapter(&adapter);
+        dxgiDevice->Release();
+        
+        IDXGIOutput* output;
+        adapter->EnumOutputs(0, &output);
+        adapter->Release();
+        
+        IDXGIOutput1* output1;
+        output->QueryInterface(IID_PPV_ARGS(&output1));
+        output->Release();
+        
+        // Create duplication interface (this is the actual low-level GPU access)
+        hr = output1->DuplicateOutput(device, &duplication);
+        output1->Release();
+        if (FAILED(hr)) return false;
+        
+        // Get screen dimensions
+        DXGI_OUTDUPL_DESC desc;
+        duplication->GetDesc(&desc);
+        screen_width = desc.ModeDesc.Width;
+        screen_height = desc.ModeDesc.Height;
+        
+        // Create staging texture with CPU_ACCESS_READ for direct memory mapping
+        D3D11_TEXTURE2D_DESC textureDesc = {};
+        textureDesc.Width = screen_width;
+        textureDesc.Height = screen_height;
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_STAGING;
+        textureDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        textureDesc.BindFlags = 0;
+        
+        hr = device->CreateTexture2D(&textureDesc, nullptr, &staging_texture);
+        if (FAILED(hr)) return false;
+        
+        // Create direct memory section for zero-copy operations
+        buffer_size = static_cast<SIZE_T>(screen_width) * screen_height * 3;
+        memory_section = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, 
+                                         PAGE_READWRITE | SEC_COMMIT, 
+                                         0, static_cast<DWORD>(buffer_size), nullptr);
+        if (!memory_section) return false;
+        
+        raw_buffer = static_cast<BYTE*>(MapViewOfFile(memory_section, 
+                                                     FILE_MAP_ALL_ACCESS, 
+                                                     0, 0, buffer_size));
+        return raw_buffer != nullptr;
+    }
+    
+    // Returns direct pointer to memory buffer - zero copy
+    BYTE* captureFrameDirect() {
+        IDXGIResource* desktopResource;
+        DXGI_OUTDUPL_FRAME_INFO frameInfo;
+        
+        // Acquire frame directly from GPU memory
+        HRESULT hr = duplication->AcquireNextFrame(16, &frameInfo, &desktopResource);
+        if (FAILED(hr)) return nullptr;
+        
+        // Get texture interface
+        ID3D11Texture2D* desktopTexture;
+        desktopResource->QueryInterface(IID_PPV_ARGS(&desktopTexture));
+        desktopResource->Release();
+        
+        // Direct GPU->CPU memory copy
+        context->CopyResource(staging_texture, desktopTexture);
+        desktopTexture->Release();
+        
+        // Map GPU memory directly to CPU addressable space
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        hr = context->Map(staging_texture, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped);
+        if (FAILED(hr)) {
+            duplication->ReleaseFrame();
+            return nullptr;
         }
         
-        SelectObject(hdcMem, hOldBitmap);
-        DeleteObject(hBitmap);
-        DeleteDC(hdcMem);
-        ReleaseDC(nullptr, hdcScreen);
+        // Direct memory operations - raw pointer arithmetic
+        BYTE* gpu_memory = static_cast<BYTE*>(mapped.pData);
+        BYTE* output_ptr = raw_buffer;
         
-        return frameData;
+        // Optimized memory conversion loop with direct pointer access
+        for (int y = 0; y < screen_height; ++y) {
+            DWORD* src_row = reinterpret_cast<DWORD*>(gpu_memory + static_cast<SIZE_T>(y) * mapped.RowPitch);
+            BYTE* dst_row = output_ptr + static_cast<SIZE_T>(y) * screen_width * 3;
+            
+            // Process 4 pixels at once when possible for better cache usage
+            int x = 0;
+            for (; x < screen_width - 3; x += 4) {
+                // Load 4 BGRA pixels as 128-bit
+                DWORD p1 = src_row[x];
+                DWORD p2 = src_row[x + 1];
+                DWORD p3 = src_row[x + 2];
+                DWORD p4 = src_row[x + 3];
+                
+                // Extract RGB components with bit manipulation
+                BYTE* dst = dst_row + x * 3;
+                
+                // Pixel 1
+                dst[0] = (p1 >> 16) & 0xFF; // R
+                dst[1] = (p1 >> 8) & 0xFF;  // G
+                dst[2] = p1 & 0xFF;         // B
+                
+                // Pixel 2
+                dst[3] = (p2 >> 16) & 0xFF;
+                dst[4] = (p2 >> 8) & 0xFF;
+                dst[5] = p2 & 0xFF;
+                
+                // Pixel 3
+                dst[6] = (p3 >> 16) & 0xFF;
+                dst[7] = (p3 >> 8) & 0xFF;
+                dst[8] = p3 & 0xFF;
+                
+                // Pixel 4
+                dst[9] = (p4 >> 16) & 0xFF;
+                dst[10] = (p4 >> 8) & 0xFF;
+                dst[11] = p4 & 0xFF;
+            }
+            
+            // Handle remaining pixels
+            for (; x < screen_width; ++x) {
+                DWORD pixel = src_row[x];
+                BYTE* dst = dst_row + x * 3;
+                dst[0] = (pixel >> 16) & 0xFF; // R
+                dst[1] = (pixel >> 8) & 0xFF;  // G
+                dst[2] = pixel & 0xFF;         // B
+            }
+        }
+        
+        context->Unmap(staging_texture, 0);
+        duplication->ReleaseFrame();
+        
+        return raw_buffer;
+    }
+    
+    // Standard vector interface for compatibility
+    std::vector<BYTE> captureFrame() {
+        BYTE* direct_buffer = captureFrameDirect();
+        if (!direct_buffer) return {};
+        
+        // Return vector that wraps our memory without copying
+        return std::vector<BYTE>(direct_buffer, direct_buffer + buffer_size);
+    }
+    
+    // Access raw memory buffer properties
+    BYTE* getRawBuffer() const { return raw_buffer; }
+    SIZE_T getBufferSize() const { return buffer_size; }
+    
+    void cleanup() {
+        if (raw_buffer) { 
+            UnmapViewOfFile(raw_buffer); 
+            raw_buffer = nullptr; 
+        }
+        if (memory_section) { 
+            CloseHandle(memory_section); 
+            memory_section = nullptr; 
+        }
+        if (staging_texture) { 
+            staging_texture->Release(); 
+            staging_texture = nullptr; 
+        }
+        if (duplication) { 
+            duplication->Release(); 
+            duplication = nullptr; 
+        }
+        if (context) { 
+            context->Release(); 
+            context = nullptr; 
+        }
+        if (device) { 
+            device->Release(); 
+            device = nullptr; 
+        }
     }
     
     int getWidth() const { return screen_width; }
