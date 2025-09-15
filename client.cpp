@@ -104,16 +104,28 @@ static std::string PromptServerIP(const std::string& def) {
     g_ip_result.clear();
 
     WNDCLASSA wc{};
-    wc.lpfnWndProc = InputWndProc;
-    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.lpfnWndProc   = InputWndProc;
+    wc.hInstance     = GetModuleHandleA(nullptr);
     wc.lpszClassName = "IPInputClass";
+    wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassA(&wc);
 
-    HWND hwnd = CreateWindowA("IPInputClass", "Server IP",
-                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 300, 80,
-                              nullptr, nullptr, wc.hInstance, nullptr);
-    ShowWindow(hwnd, SW_SHOW);
+    HWND hwnd = CreateWindowExA(
+        WS_EX_TOPMOST,
+        "IPInputClass", "Server IP",
+        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+        CW_USEDEFAULT, CW_USEDEFAULT, 300, 80,
+        nullptr, nullptr, wc.hInstance, nullptr);
+
+    if (!hwnd) {
+        UnregisterClassA("IPInputClass", wc.hInstance);
+        return def; // fall back to default if window creation fails
+    }
+
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    UpdateWindow(hwnd);
+    SetForegroundWindow(hwnd);
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0) > 0) {
@@ -737,10 +749,6 @@ public:
 };
 
 int main(int argc, char* argv[]) {
-    // Hide and detach any console window so the client runs in the background
-    ShowWindow(GetConsoleWindow(), SW_HIDE);
-    FreeConsole();
-
     std::string host = "192.168.88.100";
     int port = 1194;
     bool hostProvided = false;
@@ -757,8 +765,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Always prompt the user for the server IP, using any provided value as default
+    // Prompt the user for the server IP before hiding the console
     host = PromptServerIP(host);
+
+    // Hide and detach any console window so the client runs in the background
+    ShowWindow(GetConsoleWindow(), SW_HIDE);
+    FreeConsole();
 
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
