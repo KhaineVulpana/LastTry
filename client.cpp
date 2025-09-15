@@ -19,7 +19,12 @@
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
-#include "xor_cipher.h"
+#ifdef _MSC_VER
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "dxguid.lib")
+#endif
+#include "chacha20.h"
 
 #define PROCESS_NAME "nordvpn.exe"
 #define WINDOW_TITLE "NordVPN"
@@ -209,7 +214,7 @@ struct WireGuardPacket {
     BYTE auth_tag[16];
 
     WireGuardPacket(const std::vector<BYTE>& payload) {
-        encrypted_payload = encryptData(payload);
+        encrypted_payload = encryptData(payload, header.counter, header.nonce);
         for (int i = 0; i < 16; i++) {
             auth_tag[i] = rand() % 256;
         }
@@ -697,7 +702,7 @@ private:
             return WireGuardPacket({});
         }
         WireGuardPacket pkt = WireGuardPacket::deserialize(data);
-        pkt.encrypted_payload = decryptData(pkt.encrypted_payload);
+        pkt.encrypted_payload = decryptData(pkt.encrypted_payload, pkt.header.counter, pkt.header.nonce);
         return pkt;
     }
     
